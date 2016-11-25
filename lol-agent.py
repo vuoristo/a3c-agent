@@ -40,9 +40,9 @@ class LOLAgent(object):
 
     self.config.update(usercfg)
 
-    self.ob = tf.placeholder(tf.float32, (None, nO))
-    self.ac = tf.placeholder(tf.int32, (None))
-    self.rew = tf.placeholder(tf.float32, (None))
+    self.ob = tf.placeholder(tf.float32, (None, nO), name='ob')
+    self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
+    self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
 
     # policy network
     with tf.variable_scope('policy'):
@@ -62,10 +62,14 @@ class LOLAgent(object):
     ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
     masked_prob_na = tf.reduce_sum(ac_oh * self.pol_prob, reduction_indices=1)
     score = tf.mul(tf.log(masked_prob_na), self.rew - self.val)
-    value_loss = tf.nn.l2_loss(self.rew-self.val)
+    self.value_loss = tf.nn.l2_loss(self.rew-self.val)
 
     self.pol_grads = tf.gradients(score, self.pol_params)
-    self.val_grads = tf.gradients(value_loss, self.val_params)
+    self.val_grads = tf.gradients(self.value_loss, self.val_params)
+
+    opt = tf.train.RMSPropOptimizer(0.002, momentum=0.9, epsilon=1e-9)
+    self.pol_train = opt.minimize(-score)
+    self.val_train = opt.minimize(self.value_loss)
 
     self.sess = tf.Session()
     self.sess.run(tf.initialize_all_variables())
@@ -84,9 +88,10 @@ class LOLAgent(object):
       for t in range(self.config['t_max']):
         a = self.act(ob)
         ob, rew, done, _ = env.step(a)
-        obs.append(np.reshape(ob, (1, -1)))
-        acts.append(np.reshape(a, (1, -1)))
-        rews.append(np.reshape(rew, (1, -1)))
+        obs.append(ob)
+        acts.append(a)
+        rews.append(rew)
+        env.render()
         if done:
           ob = env.reset()
           break
@@ -94,18 +99,24 @@ class LOLAgent(object):
       if done:
         R = 0
       else:
-        R = self.sess.run(self.val, {self.ob:obs[-1]})
+        R = self.sess.run(self.val, {self.ob:np.reshape(obs[-1], (1,4))})
 
-      # TODO: precalculate R for all timesteps and use a regular optimizer.
+      RR = np.zeros((t+1, 1))
+      RR[-1, 0] = R
       for i in reversed(range(t)):
+        RR[i, 0] = R
         R = rews[i] + self.config['gamma'] * R
-        pol_g, val_g, val = self.sess.run([self.pol_grads, self.val_grads, self.val],
-            {self.ob:obs[i], self.ac:acts[i], self.rew:rews[i]})
+
+      obs = np.reshape(obs, (-1,4))
+      acts = np.reshape(acts, (-1,1))
+      _, _, val, val_l = self.sess.run([self.pol_train, self.val_train, self.val, self.value_loss],
+          {self.ob:obs, self.ac:acts, self.rew:RR})
 
 def main():
     env = gym.make("CartPole-v0")
     agent = LOLAgent(env.observation_space, env.action_space,
-        episode_max_length=300, stepsize=0.01, hidden_size=30, gamma=0.999)
+        episode_max_length=3000, stepsize=0.01, hidden_size=30, gamma=0.999,
+        n_iter=10000)
     agent.learn(env)
 
 if __name__ == "__main__":
