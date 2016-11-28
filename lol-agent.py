@@ -32,7 +32,7 @@ class LOLAgent(object):
         n_iter = 100,
         t_max = 10,
         gamma = 0.98,
-        stepsize = 0.05,
+        lr = 0.05,
         nhid_p = 20,
         nhid_v = 20,
         episode_max_length = 100,
@@ -67,7 +67,8 @@ class LOLAgent(object):
     self.pol_grads = tf.gradients(score, self.pol_params)
     self.val_grads = tf.gradients(self.value_loss, self.val_params)
 
-    opt = tf.train.RMSPropOptimizer(0.002, momentum=0.9, epsilon=1e-9)
+    opt = tf.train.RMSPropOptimizer(self.config['lr'], momentum=0.9,
+        epsilon=1e-9)
     self.pol_train = opt.minimize(-score)
     self.val_train = opt.minimize(self.value_loss)
 
@@ -115,7 +116,7 @@ class LOLAgent(object):
 def main():
     env = gym.make("CartPole-v0")
     agent = LOLAgent(env.observation_space, env.action_space,
-        episode_max_length=3000, stepsize=0.01, hidden_size=30, gamma=0.999,
+        episode_max_length=3000, lr=0.002, hidden_size=30, gamma=0.999,
         n_iter=10000)
     agent.learn(env)
 
