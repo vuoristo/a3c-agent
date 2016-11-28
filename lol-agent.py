@@ -25,8 +25,8 @@ def build_weights(input_size, hidden_size, output_size):
 
 class LOLAgent(object):
   def __init__(self, obs_space, action_space, **usercfg):
-    nO = obs_space.shape[0]
-    nA = action_space.n
+    self.nO = obs_space.shape[0]
+    self.nA = action_space.n
 
     self.config = dict(
         n_iter = 100,
@@ -40,13 +40,13 @@ class LOLAgent(object):
 
     self.config.update(usercfg)
 
-    self.ob = tf.placeholder(tf.float32, (None, nO), name='ob')
+    self.ob = tf.placeholder(tf.float32, (None, self.nO), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
 
     # policy network
     with tf.variable_scope('policy'):
-      net = build_weights(nO, self.config['nhid_p'], nA)
+      net = build_weights(self.nO, self.config['nhid_p'], self.nA)
       self.pol_prob = tf.nn.softmax(tf.matmul(tf.tanh(tf.matmul(
             self.ob, net['W0']) + net['b0']), net['W1']) + net['b1'])
 
@@ -54,12 +54,12 @@ class LOLAgent(object):
 
     # value network
     with tf.variable_scope('value'):
-      net = build_weights(nO, self.config['nhid_v'], 1)
+      net = build_weights(self.nO, self.config['nhid_v'], 1)
       self.val = tf.matmul(tf.tanh(tf.matmul(
             self.ob, net['W0']) + net['b0']), net['W1']) + net['b1']
       self.val_params = list(net.values())
 
-    ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
+    ac_oh = tf.reshape(tf.one_hot(self.ac, self.nA), (-1, self.nA))
     masked_prob_na = tf.reduce_sum(ac_oh * self.pol_prob, reduction_indices=1)
     score = tf.mul(tf.log(masked_prob_na), self.rew - self.val)
     self.value_loss = tf.nn.l2_loss(self.rew-self.val)
@@ -100,7 +100,7 @@ class LOLAgent(object):
       if done:
         R = 0
       else:
-        R = self.sess.run(self.val, {self.ob:np.reshape(obs[-1], (1,4))})
+        R = self.sess.run(self.val, {self.ob:np.reshape(obs[-1], (1,self.nO))})
 
       RR = np.zeros((t+1, 1))
       RR[-1, 0] = R
@@ -108,7 +108,7 @@ class LOLAgent(object):
         RR[i, 0] = R
         R = rews[i] + self.config['gamma'] * R
 
-      obs = np.reshape(obs, (-1,4))
+      obs = np.reshape(obs, (-1,self.nO))
       acts = np.reshape(acts, (-1,1))
       _, _, val, val_l = self.sess.run([self.pol_train, self.val_train, self.val, self.value_loss],
           {self.ob:obs, self.ac:acts, self.rew:RR})
