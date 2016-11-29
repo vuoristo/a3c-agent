@@ -2,6 +2,7 @@ import gym
 import tensorflow as tf
 import numpy as np
 import threading
+from collections import deque
 
 def categorical_sample(prob_n):
     """
@@ -94,8 +95,7 @@ class LOLAgent(object):
     self.config.update(usercfg)
 
     with tf.variable_scope('global_policy'):
-      global_policy = build_weights(self.nO, self.config['nhid_p'],
-          self.nA)
+      global_policy = build_weights(self.nO, self.config['nhid_p'], self.nA)
     with tf.variable_scope('global_value'):
       global_value = build_weights(self.nO, self.config['nhid_v'], 1)
 
@@ -110,8 +110,7 @@ class LOLAgent(object):
     self.sess.run(tf.initialize_all_variables())
 
   def act(self, ob, model):
-    prob = self.sess.run(model.pol_prob, {model.ob:np.reshape(ob, (1,
-      -1))})
+    prob = self.sess.run(model.pol_prob, {model.ob:np.reshape(ob, (1, -1))})
     action = categorical_sample(prob)
     return action
 
@@ -120,6 +119,7 @@ class LOLAgent(object):
     model = self.thr_models[thread_id]
     ob = env.reset()
     env_steps = 0
+    ravg = deque(maxlen=100)
     for iteration in range(self.config['n_iter']):
       obs = []
       acts = []
@@ -132,8 +132,10 @@ class LOLAgent(object):
         rews.append(rew)
         env_steps += 1
         if done:
+          ravg.append(env_steps)
           ob = env.reset()
-          print('Thread: {} Steps: {}'.format(thread_id, env_steps))
+          print('Thread: {} Steps: {} av100: {}'.format(
+            thread_id, env_steps, np.mean(ravg)))
           env_steps = 0
           break
 
@@ -164,8 +166,7 @@ class LOLAgent(object):
 def main():
     env = gym.make("CartPole-v0")
     agent = LOLAgent(env.observation_space, env.action_space,
-        episode_max_length=10000, update_rate=0.00001, hidden_size=30,
-        gamma=0.999, n_iter=10000)
+        episode_max_length=10000, update_rate=0.001, gamma=0.999, n_iter=10000)
     agent.learn()
 
 if __name__ == "__main__":
