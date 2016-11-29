@@ -16,11 +16,11 @@ def build_weights(input_size, hidden_size, output_size):
   init = tf.constant(np.random.randn(input_size,
     hidden_size)/np.sqrt(input_size), dtype=tf.float32)
   W0 = tf.get_variable('W0', initializer=init)
-  b0 = tf.Variable(tf.constant(0., shape=(hidden_size,)))
+  b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(hidden_size,)))
   init2 = tf.constant(1e-4*np.random.randn(hidden_size, output_size),
       dtype=tf.float32)
   W1 = tf.get_variable('W1',initializer=init2)
-  b1 = tf.Variable(tf.constant(0., shape=(output_size,)))
+  b1 = tf.get_variable('b1', initializer=tf.constant(0., shape=(output_size,)))
 
   return {'W0':W0, 'b0':b0, 'W1':W1, 'b1':b1}
 
@@ -35,36 +35,41 @@ class ThreadModel(object):
       net = build_weights(nO, config['nhid_p'], nA)
       self.pol_prob = tf.nn.softmax(tf.matmul(tf.tanh(tf.matmul(
             self.ob, net['W0']) + net['b0']), net['W1']) + net['b1'])
-      self.pol_net = net
+      pol_names, pol_vars = zip(*net.items())
 
     # value network
     with tf.variable_scope('value'):
       net = build_weights(nO, config['nhid_v'], 1)
       self.val = tf.matmul(tf.tanh(tf.matmul(
             self.ob, net['W0']) + net['b0']), net['W1']) + net['b1']
-      self.val_net = net
+      val_names, val_vars = zip(*net.items())
 
     ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
     masked_prob_na = tf.reduce_sum(ac_oh * self.pol_prob, reduction_indices=1)
     score = tf.mul(tf.log(masked_prob_na), self.rew - self.val)
     value_loss = tf.nn.l2_loss(self.rew-self.val)
 
+    # TODO: do we want to get the gradients from the optimizer or are there
+    # better places to do that?
     opt = tf.train.RMSPropOptimizer(config['lr'], momentum=0.9,
         epsilon=1e-9)
-    self.pol_train = opt.minimize(-score)
-    self.val_train = opt.minimize(value_loss)
 
-    self.pol_updates = self.get_updates(global_policy, self.pol_net,
-        config['update_rate'])
-    self.val_updates = self.get_updates(global_value, self.val_net,
-        config['update_rate'])
+    pg = opt.compute_gradients(-score, pol_vars)
+    self.pol_grads = {k: v for k, v in zip(pol_names, pg)}
+    vg = opt.compute_gradients(value_loss, val_vars)
+    self.val_grads = {k: v for k, v in zip(val_names, vg)}
 
-  def get_updates(self, global_net, local_net, lr):
+    self.pol_updates = self.get_updates(global_policy, pol_vars,
+        self.pol_grads, config['update_rate'])
+    self.val_updates = self.get_updates(global_value, val_vars,
+        self.val_grads, config['update_rate'])
+
+  def get_updates(self, global_net, local_net, grads, lr):
     updates = []
-    for key, local_weight in local_net.items():
+    for key, grad in grads.items():
       W = global_net.get(key)
-      l_to_g = W.assign((1.0 - lr) * W + lr * local_weight)
-      g_to_l = local_weight.assign(W)
+      l_to_g = W.assign(W + lr * grad[0])
+      g_to_l = grad[1].assign(W)
       updates += [l_to_g, g_to_l]
 
     return updates
@@ -146,9 +151,8 @@ class LOLAgent(object):
 
       obs = np.reshape(obs, (-1,self.nO))
       acts = np.reshape(acts, (-1,1))
-      _, _ = self.sess.run([model.pol_train, model.val_train],
+      _, _ = self.sess.run([model.pol_updates, model.val_updates],
           {model.ob:obs, model.ac:acts, model.rew:RR})
-      self.sess.run([model.pol_updates, model.val_updates])
 
   def learn(self):
     ths = [threading.Thread(target=self.learning_thread, args=(i,)) for i in
@@ -160,8 +164,8 @@ class LOLAgent(object):
 def main():
     env = gym.make("CartPole-v0")
     agent = LOLAgent(env.observation_space, env.action_space,
-        episode_max_length=10000, lr=0.002, hidden_size=30, gamma=0.999,
-        n_iter=10000)
+        episode_max_length=10000, update_rate=0.00001, hidden_size=30,
+        gamma=0.999, n_iter=10000)
     agent.learn()
 
 if __name__ == "__main__":
