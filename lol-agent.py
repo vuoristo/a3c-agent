@@ -60,17 +60,18 @@ class ThreadModel(object):
     vg = opt.compute_gradients(value_loss, val_vars)
     self.val_grads = {k: v for k, v in zip(val_names, vg)}
 
-    self.pol_updates = self.get_updates(global_policy, pol_vars,
-        self.pol_grads, config['update_rate'])
-    self.val_updates = self.get_updates(global_value, val_vars,
-        self.val_grads, config['update_rate'])
+    self.pol_updates = self.get_updates(global_policy, self.pol_grads,
+        config['update_rate'])
+    self.val_updates = self.get_updates(global_value, self.val_grads,
+        config['update_rate'])
 
-  def get_updates(self, global_net, local_net, grads, lr):
+  def get_updates(self, global_net, grads, lr):
     updates = []
-    for key, grad in grads.items():
+    for key, grad_entry in grads.items():
       W = global_net.get(key)
-      l_to_g = W.assign(W + lr * grad[0])
-      g_to_l = grad[1].assign(W)
+      grad = tf.clip_by_norm(grad_entry[0], 1.)
+      l_to_g = W.assign(W + lr * grad)
+      g_to_l = grad_entry[1].assign(W)
       updates += [l_to_g, g_to_l]
 
     return updates
@@ -85,11 +86,11 @@ class LOLAgent(object):
         t_max = 10,
         gamma = 0.98,
         lr = 0.05,
-        update_rate = 0.5,
+        update_rate = 0.002,
         nhid_p = 20,
         nhid_v = 20,
         episode_max_length = 100,
-        num_threads = 4,
+        num_threads = 1,
       )
 
     self.config.update(usercfg)
