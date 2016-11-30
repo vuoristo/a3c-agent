@@ -55,7 +55,7 @@ class ThreadModel(object):
     opt = tf.train.RMSPropOptimizer(config['lr'], momentum=0.9,
         epsilon=1e-9)
 
-    pg = opt.compute_gradients(-score, pol_vars)
+    pg = opt.compute_gradients(score, pol_vars)
     self.pol_grads = {k: v for k, v in zip(pol_names, pg)}
     vg = opt.compute_gradients(value_loss, val_vars)
     self.val_grads = {k: v for k, v in zip(val_names, vg)}
@@ -70,7 +70,7 @@ class ThreadModel(object):
     for key, grad_entry in grads.items():
       W = global_net.get(key)
       grad = tf.clip_by_norm(grad_entry[0], 1.)
-      l_to_g = W.assign(W + lr * grad)
+      l_to_g = W.assign(W - lr * grad)
       g_to_l = grad_entry[1].assign(W)
       updates += [l_to_g, g_to_l]
 
