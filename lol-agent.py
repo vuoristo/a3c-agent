@@ -13,17 +13,23 @@ def categorical_sample(prob_n):
   csprob_n = np.cumsum(prob_n)
   return (csprob_n > np.random.rand()).argmax()
 
-def build_weights(input_size, hidden_size, output_size):
-  init = tf.constant(np.random.randn(input_size,
-    hidden_size)/np.sqrt(input_size), dtype=tf.float32)
-  W0 = tf.get_variable('W0', initializer=init)
-  b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(hidden_size,)))
-  init2 = tf.constant(1e-4*np.random.randn(hidden_size, output_size),
-      dtype=tf.float32)
-  W1 = tf.get_variable('W1',initializer=init2)
-  b1 = tf.get_variable('b1', initializer=tf.constant(0., shape=(output_size,)))
+def build_network(input_size, hidden_1, hidden_2, output_size):
+  init = tf.uniform_unit_scaling_initializer()
+  W0 = tf.get_variable('W0', shape=(input_size, hidden_1), initializer=init)
+  b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(hidden_1,)))
+  W1 = tf.get_variable('W1', shape=(hidden_1, hidden_2), initializer=init)
+  b1 = tf.get_variable('b1', initializer=tf.constant(0., shape=(hidden_2,)))
 
-  return {'W0':W0, 'b0':b0, 'W1':W1, 'b1':b1}
+  W_softmax = tf.get_variable('W_softmax', shape=(hidden_2, output_size), initializer=init)
+  b_softmax = tf.get_variable('b_softmax', initializer=tf.constant(0., shape=(output_size,)))
+
+  W_linear = tf.get_variable('W_linear', shape=(hidden_2, 1), initializer=init)
+  b_linear = tf.get_variable('b_linear', initializer=tf.constant(0., shape=(1,)))
+
+  pol_vars = [W0, b0, W1, b1, W_softmax, b_softmax]
+  val_vars = [W_linear, b_linear]
+
+  return pol_vars, val_vars
 
 class ThreadModel(object):
   def __init__(self, nO, nA, global_policy, global_value, config):
@@ -31,23 +37,19 @@ class ThreadModel(object):
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
 
-    # policy network
-    with tf.variable_scope('policy'):
-      net = build_weights(nO, config['nhid_p'], nA)
-      self.pol_prob = tf.nn.softmax(tf.matmul(tf.tanh(tf.matmul(
-            self.ob, net['W0']) + net['b0']), net['W1']) + net['b1'])
-      pol_names, pol_vars = zip(*net.items())
+    pol_vars, val_vars = build_network(nO, config['hidden_1'],
+      config['hidden_2'], nA)
 
-    # value network
-    with tf.variable_scope('value'):
-      net = build_weights(nO, config['nhid_v'], 1)
-      self.val = tf.matmul(tf.tanh(tf.matmul(
-            self.ob, net['W0']) + net['b0']), net['W1']) + net['b1']
-      val_names, val_vars = zip(*net.items())
+    h_1 = tf.tanh(tf.nn.bias_add(tf.matmul(tf.tanh(tf.nn.bias_add(tf.matmul(
+      self.ob, pol_vars[0]), pol_vars[1])), pol_vars[2]), pol_vars[3]))
+    self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
+      h_1, pol_vars[4]), pol_vars[5]))
+    self.val = tf.nn.bias_add(tf.matmul(h_1, val_vars[0]), val_vars[1])
 
     ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
     masked_prob_na = tf.reduce_sum(ac_oh * self.pol_prob, reduction_indices=1)
-    score = tf.mul(tf.log(tf.clip_by_value(masked_prob_na, 1.e-10, 1.0)), self.rew - self.val)
+    score = tf.mul(tf.log(tf.clip_by_value(
+      masked_prob_na, 1.e-10, 1.0)), self.rew - self.val)
     value_loss = tf.nn.l2_loss(self.rew - self.val)
 
     # TODO: do we want to get the gradients from the optimizer or are there
@@ -55,10 +57,8 @@ class ThreadModel(object):
     opt = tf.train.RMSPropOptimizer(config['lr'], momentum=0.9,
         epsilon=1e-9)
 
-    pg = opt.compute_gradients(score, pol_vars)
-    self.pol_grads = {k: v for k, v in zip(pol_names, pg)}
-    vg = opt.compute_gradients(value_loss, val_vars)
-    self.val_grads = {k: v for k, v in zip(val_names, vg)}
+    self.pol_grads = opt.compute_gradients(score, pol_vars)
+    self.val_grads = opt.compute_gradients(value_loss, val_vars)
 
     self.pol_updates = self.get_updates(global_policy, self.pol_grads,
         config['update_rate'])
@@ -67,8 +67,8 @@ class ThreadModel(object):
 
   def get_updates(self, global_net, grads, lr):
     updates = []
-    for key, grad_entry in grads.items():
-      W = global_net.get(key)
+    for i, grad_entry in enumerate(grads):
+      W = global_net[i]
       grad = tf.clip_by_norm(grad_entry[0], 1.)
       l_to_g = W.assign_add(-lr * grad)
       g_to_l = grad_entry[1].assign(W)
@@ -87,24 +87,22 @@ class LOLAgent(object):
         gamma = 0.98,
         lr = 0.05,
         update_rate = 0.002,
-        nhid_p = 20,
-        nhid_v = 20,
+        hidden_1 = 10,
+        hidden_2 = 5,
         episode_max_length = 100,
         num_threads = 1,
       )
 
     self.config.update(usercfg)
 
-    with tf.variable_scope('global_policy'):
-      global_policy = build_weights(self.nO, self.config['nhid_p'], self.nA)
-    with tf.variable_scope('global_value'):
-      global_value = build_weights(self.nO, self.config['nhid_v'], 1)
+    pol_vars, val_vars = build_network(self.nO, self.config['hidden_1'],
+      self.config['hidden_2'], self.nA)
 
     self.thr_models = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
-        thr_model = ThreadModel(self.nO, self.nA, global_policy,
-            global_value, self.config)
+        thr_model = ThreadModel(self.nO, self.nA, pol_vars,
+            val_vars, self.config)
         self.thr_models.append(thr_model)
 
     self.sess = tf.Session()
