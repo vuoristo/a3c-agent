@@ -17,17 +17,15 @@ def build_network(input_size, hidden_1, hidden_2, output_size):
   init = tf.uniform_unit_scaling_initializer()
   W0 = tf.get_variable('W0', shape=(input_size, hidden_1), initializer=init)
   b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(hidden_1,)))
-  W1 = tf.get_variable('W1', shape=(hidden_1, hidden_2), initializer=init)
-  b1 = tf.get_variable('b1', initializer=tf.constant(0., shape=(hidden_2,)))
 
-  W_softmax = tf.get_variable('W_softmax', shape=(hidden_2, output_size), initializer=init)
+  W_softmax = tf.get_variable('W_softmax', shape=(hidden_1, output_size), initializer=init)
   b_softmax = tf.get_variable('b_softmax', initializer=tf.constant(0., shape=(output_size,)))
 
-  W_linear = tf.get_variable('W_linear', shape=(hidden_2, 1), initializer=init)
+  W_linear = tf.get_variable('W_linear', shape=(hidden_1, 1), initializer=init)
   b_linear = tf.get_variable('b_linear', initializer=tf.constant(0., shape=(1,)))
 
-  pol_vars = [W0, b0, W1, b1, W_softmax, b_softmax]
-  val_vars = [W_linear, b_linear]
+  pol_vars = [W0, b0, W_softmax, b_softmax]
+  val_vars = [W_linear, b_linear, W0, b0]
 
   return pol_vars, val_vars
 
@@ -40,10 +38,10 @@ class ThreadModel(object):
     pol_vars, val_vars = build_network(nO, config['hidden_1'],
       config['hidden_2'], nA)
 
-    h_1 = tf.tanh(tf.nn.bias_add(tf.matmul(tf.tanh(tf.nn.bias_add(tf.matmul(
-      self.ob, pol_vars[0]), pol_vars[1])), pol_vars[2]), pol_vars[3]))
-    self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
-      h_1, pol_vars[4]), pol_vars[5]))
+    h_1 = tf.tanh(tf.nn.bias_add(tf.matmul(
+      self.ob, pol_vars[0]), pol_vars[1]))
+
+    self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(h_1, pol_vars[2]), pol_vars[3]))
     self.val = tf.nn.bias_add(tf.matmul(h_1, val_vars[0]), val_vars[1])
 
     ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
@@ -87,7 +85,7 @@ class LOLAgent(object):
         gamma = 0.98,
         lr = 0.05,
         update_rate = 0.002,
-        hidden_1 = 10,
+        hidden_1 = 20,
         hidden_2 = 5,
         episode_max_length = 100,
         num_threads = 1,
