@@ -70,7 +70,7 @@ class ThreadModel(object):
     for key, grad_entry in grads.items():
       W = global_net.get(key)
       grad = tf.clip_by_norm(grad_entry[0], 1.)
-      l_to_g = W.assign(W - lr * grad)
+      l_to_g = W.assign_add(-lr * grad)
       g_to_l = grad_entry[1].assign(W)
       updates += [l_to_g, g_to_l]
 
