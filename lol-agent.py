@@ -47,7 +47,7 @@ class ThreadModel(object):
 
     ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
     masked_prob_na = tf.reduce_sum(ac_oh * self.pol_prob, reduction_indices=1)
-    score = tf.mul(tf.log(masked_prob_na), self.rew - self.val)
+    score = tf.mul(tf.log(tf.clip_by_value(masked_prob_na, 1.e-10, 1.0)), self.rew - self.val)
     value_loss = tf.nn.l2_loss(self.rew - self.val)
 
     # TODO: do we want to get the gradients from the optimizer or are there
