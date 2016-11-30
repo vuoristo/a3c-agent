@@ -5,13 +5,13 @@ import threading
 from collections import deque
 
 def categorical_sample(prob_n):
-    """
-    Sample from categorical distribution,
-    specified by a vector of class probabilities
-    """
-    prob_n = np.asarray(prob_n)
-    csprob_n = np.cumsum(prob_n)
-    return (csprob_n > np.random.rand()).argmax()
+  """
+  Sample from categorical distribution,
+  specified by a vector of class probabilities
+  """
+  prob_n = np.asarray(prob_n)
+  csprob_n = np.cumsum(prob_n)
+  return (csprob_n > np.random.rand()).argmax()
 
 def build_weights(input_size, hidden_size, output_size):
   init = tf.constant(np.random.randn(input_size,
@@ -48,7 +48,7 @@ class ThreadModel(object):
     ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
     masked_prob_na = tf.reduce_sum(ac_oh * self.pol_prob, reduction_indices=1)
     score = tf.mul(tf.log(masked_prob_na), self.rew - self.val)
-    value_loss = tf.nn.l2_loss(self.rew-self.val)
+    value_loss = tf.nn.l2_loss(self.rew - self.val)
 
     # TODO: do we want to get the gradients from the optimizer or are there
     # better places to do that?
