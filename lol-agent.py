@@ -37,6 +37,7 @@ class ThreadModel(object):
     self.ob = tf.placeholder(tf.float32, (None, nO), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
+    self.lr = tf.placeholder(tf.float32, name='lr')
 
     pol_vars, val_vars = build_network(nO, config['hidden_1'],
       config['hidden_2'], nA)
@@ -54,27 +55,30 @@ class ThreadModel(object):
       masked_prob_na, 1.e-10, 1.0)), self.rew - self.val)
     value_loss = tf.nn.l2_loss(self.rew - self.val)
 
-    # TODO: do we want to get the gradients from the optimizer or are there
-    # better places to do that?
-    opt = tf.train.RMSPropOptimizer(config['lr'], momentum=0.9,
-        epsilon=1e-9)
+    self.pol_grads = tf.gradients(score, pol_vars)
+    self.val_grads = tf.gradients(value_loss, val_vars)
 
-    self.pol_grads = opt.compute_gradients(score, pol_vars)
-    self.val_grads = opt.compute_gradients(value_loss, val_vars)
+    self.pol_updates = self.get_updates(global_policy, self.pol_grads, pol_vars)
+    self.val_updates = self.get_updates(global_value, self.val_grads, val_vars)
 
-    self.pol_updates = self.get_updates(global_policy, self.pol_grads,
-        config['update_rate'])
-    self.val_updates = self.get_updates(global_value, self.val_grads,
-        config['update_rate'])
+    self.dbg_var = self.pol_updates[0]
 
-  def get_updates(self, global_net, grads, lr):
+  def get_updates(self, global_vars, grads, local_vars, momentum=0.9,
+                  epsilon=1e-9):
     updates = []
-    for i, grad_entry in enumerate(grads):
-      W = global_net[i]
-      grad = tf.clip_by_norm(grad_entry[0], 1.)
-      l_to_g = W.assign_add(-lr * grad)
-      g_to_l = grad_entry[1].assign(W)
-      updates += [l_to_g, g_to_l]
+    for Wg, Wl, grad in zip(global_vars, local_vars, grads):
+      grad = tf.clip_by_norm(grad, 10.)
+      # compute rmsprop update per variable
+      mean_square = tf.Variable(np.zeros(grad.get_shape()),
+        dtype=tf.float32)
+      ms_update = momentum * mean_square + (1. - momentum) * tf.pow(grad, 2)
+      gradient_update = -self.lr * grad / tf.sqrt(ms_update + epsilon)
+
+      # apply updates to global variables, copy back to local variables
+      l_to_g = Wg.assign_add(gradient_update)
+      g_to_l = Wl.assign(Wg)
+
+      updates += [l_to_g, g_to_l, mean_square, ms_update]
 
     return updates
 
@@ -87,8 +91,9 @@ class LOLAgent(object):
         n_iter = 100,
         t_max = 10,
         gamma = 0.98,
-        lr = 0.05,
-        update_rate = 0.002,
+        lr = 0.01,
+        min_lr = 0.002,
+        lr_decay_steps = 10000,
         hidden_1 = 20,
         hidden_2 = 5,
         episode_max_length = 100,
@@ -121,6 +126,8 @@ class LOLAgent(object):
     ob = env.reset()
     env_steps = 0
     ravg = deque(maxlen=100)
+    lr = self.config['lr']
+    lr_decay_step = (lr - self.config['min_lr'])/self.config['lr_decay_steps']
     for iteration in range(self.config['n_iter']):
       obs = []
       acts = []
@@ -132,6 +139,8 @@ class LOLAgent(object):
         acts.append(a)
         rews.append(rew)
         env_steps += 1
+        if lr > self.config['min_lr']:
+          lr -= lr_decay_step
         if done:
           ravg.append(env_steps)
           ob = env.reset()
