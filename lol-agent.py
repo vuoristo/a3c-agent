@@ -33,7 +33,8 @@ def build_network(input_size, hidden_1, hidden_2, output_size):
   return pol_vars, val_vars
 
 class ThreadModel(object):
-  def __init__(self, nO, nA, global_policy, global_value, config):
+  def __init__(self, nO, nA, global_policy, global_value, pol_grad_msq,
+               val_grad_msq, config):
     self.ob = tf.placeholder(tf.float32, (None, nO), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
@@ -58,27 +59,28 @@ class ThreadModel(object):
     self.pol_grads = tf.gradients(score, pol_vars)
     self.val_grads = tf.gradients(value_loss, val_vars)
 
-    self.pol_updates = self.get_updates(global_policy, self.pol_grads, pol_vars)
-    self.val_updates = self.get_updates(global_value, self.val_grads, val_vars)
+    self.pol_updates = self.get_updates(global_policy, pol_vars,
+        self.pol_grads, pol_grad_msq)
+    self.val_updates = self.get_updates(global_value, val_vars,
+        self.val_grads, val_grad_msq)
 
     self.dbg_var = self.pol_updates[0]
 
-  def get_updates(self, global_vars, grads, local_vars, momentum=0.9,
+  def get_updates(self, global_vars, local_vars, grads, grad_msq, momentum=0.9,
                   epsilon=1e-9):
     updates = []
-    for Wg, Wl, grad in zip(global_vars, local_vars, grads):
+    for Wg, Wl, grad, msq in zip(global_vars, local_vars, grads, grad_msq):
       grad = tf.clip_by_norm(grad, 10.)
+
       # compute rmsprop update per variable
-      mean_square = tf.Variable(np.zeros(grad.get_shape()),
-        dtype=tf.float32)
-      ms_update = momentum * mean_square + (1. - momentum) * tf.pow(grad, 2)
+      ms_update = momentum * msq + (1. - momentum) * tf.pow(grad, 2)
       gradient_update = -self.lr * grad / tf.sqrt(ms_update + epsilon)
 
       # apply updates to global variables, copy back to local variables
       l_to_g = Wg.assign_add(gradient_update)
       g_to_l = Wl.assign(Wg)
 
-      updates += [l_to_g, g_to_l, mean_square, ms_update]
+      updates += [l_to_g, g_to_l, ms_update]
 
     return updates
 
@@ -102,14 +104,19 @@ class LOLAgent(object):
 
     self.config.update(usercfg)
 
-    pol_vars, val_vars = build_network(self.nO, self.config['hidden_1'],
-      self.config['hidden_2'], self.nA)
+    with tf.variable_scope('global_network') as global_scope:
+      pol_vars, val_vars = build_network(self.nO, self.config['hidden_1'],
+        self.config['hidden_2'], self.nA)
+      pol_grad_msq = [tf.Variable(np.zeros(var.get_shape(), dtype=np.float32))
+          for var in pol_vars]
+      val_grad_msq = [tf.Variable(np.zeros(var.get_shape(), dtype=np.float32))
+          for var in val_vars]
 
     self.thr_models = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
         thr_model = ThreadModel(self.nO, self.nA, pol_vars,
-          val_vars, self.config)
+          val_vars, pol_grad_msq, val_grad_msq, self.config)
         self.thr_models.append(thr_model)
 
     self.sess = tf.Session()
