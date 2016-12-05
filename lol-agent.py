@@ -177,7 +177,7 @@ def main():
     env = gym.make("CartPole-v0")
     agent = LOLAgent(env.observation_space, env.action_space,
       episode_max_length=10000, gamma=0.99, n_iter=1000000,
-      num_threads=4, t_max=5)
+      num_threads=4, t_max=5, min_lr=0.0001, lr_decay_steps=30000)
     agent.learn()
 
 if __name__ == "__main__":
