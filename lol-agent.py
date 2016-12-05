@@ -18,11 +18,14 @@ def build_network(input_size, hidden_1, hidden_2, output_size):
   W0 = tf.get_variable('W0', shape=(input_size, hidden_1), initializer=init)
   b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(hidden_1,)))
 
-  W_softmax = tf.get_variable('W_softmax', shape=(hidden_1, output_size), initializer=init)
-  b_softmax = tf.get_variable('b_softmax', initializer=tf.constant(0., shape=(output_size,)))
+  W_softmax = tf.get_variable('W_softmax', shape=(hidden_1, output_size),
+    initializer=init)
+  b_softmax = tf.get_variable('b_softmax', initializer=tf.constant(0.,
+    shape=(output_size,)))
 
   W_linear = tf.get_variable('W_linear', shape=(hidden_1, 1), initializer=init)
-  b_linear = tf.get_variable('b_linear', initializer=tf.constant(0., shape=(1,)))
+  b_linear = tf.get_variable('b_linear', initializer=tf.constant(0.,
+    shape=(1,)))
 
   pol_vars = [W0, b0, W_softmax, b_softmax]
   val_vars = [W_linear, b_linear, W0, b0]
@@ -41,7 +44,8 @@ class ThreadModel(object):
     h_1 = tf.tanh(tf.nn.bias_add(tf.matmul(
       self.ob, pol_vars[0]), pol_vars[1]))
 
-    self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(h_1, pol_vars[2]), pol_vars[3]))
+    self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(h_1, pol_vars[2]),
+      pol_vars[3]))
     self.val = tf.nn.bias_add(tf.matmul(h_1, val_vars[0]), val_vars[1])
 
     ac_oh = tf.reshape(tf.one_hot(self.ac, nA), (-1, nA))
@@ -100,7 +104,7 @@ class LOLAgent(object):
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
         thr_model = ThreadModel(self.nO, self.nA, pol_vars,
-            val_vars, self.config)
+          val_vars, self.config)
         self.thr_models.append(thr_model)
 
     self.sess = tf.Session()
@@ -155,7 +159,7 @@ class LOLAgent(object):
 
   def learn(self):
     ths = [threading.Thread(target=self.learning_thread, args=(i,)) for i in
-        range(self.config['num_threads'])]
+      range(self.config['num_threads'])]
 
     for t in ths:
       t.start()
@@ -163,7 +167,8 @@ class LOLAgent(object):
 def main():
     env = gym.make("CartPole-v0")
     agent = LOLAgent(env.observation_space, env.action_space,
-        episode_max_length=10000, update_rate=0.001, gamma=0.999, n_iter=10000)
+      episode_max_length=10000, gamma=0.99, n_iter=1000000,
+      num_threads=4, t_max=5)
     agent.learn()
 
 if __name__ == "__main__":
