@@ -108,9 +108,9 @@ class LOLAgent(object):
       pol_vars, val_vars = build_network(self.nO, self.config['hidden_1'],
         self.config['hidden_2'], self.nA)
       pol_grad_msq = [tf.Variable(np.zeros(var.get_shape(), dtype=np.float32))
-          for var in pol_vars]
+        for var in pol_vars]
       val_grad_msq = [tf.Variable(np.zeros(var.get_shape(), dtype=np.float32))
-          for var in val_vars]
+        for var in val_vars]
 
     self.thr_models = []
     for thr in range(self.config['num_threads']):
