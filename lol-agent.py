@@ -4,17 +4,18 @@ import numpy as np
 import threading
 from collections import deque
 
-def categorical_sample(prob_n):
+def categorical_sample(prob):
   """
   Sample from categorical distribution,
   specified by a vector of class probabilities
   """
-  prob_n = np.asarray(prob_n)
-  csprob_n = np.cumsum(prob_n)
-  return (csprob_n > np.random.rand()).argmax()
+  prob = np.asarray(prob)
+  csprob = np.cumsum(prob)
+  return (csprob > np.random.rand()).argmax()
 
 class ThreadModel(object):
-  def __init__(self, input_size, output_size, global_network, is_global, config):
+  def __init__(self, input_size, output_size, global_network, is_global,
+               config):
     self.ob = tf.placeholder(tf.float32, (None, input_size), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
@@ -22,6 +23,7 @@ class ThreadModel(object):
 
     W0_size = config['hidden_1']
 
+    # Model variables
     with tf.variable_scope('shared_variables') as sv_scope:
       init = tf.uniform_unit_scaling_initializer()
       W0 = tf.get_variable('W0', shape=(input_size, W0_size), initializer=init)
@@ -30,15 +32,16 @@ class ThreadModel(object):
     with tf.variable_scope('policy') as pol_scope:
       W_softmax = tf.get_variable('W_softmax', shape=(W0_size, output_size),
         initializer=init)
-      b_softmax = tf.get_variable('b_softmax', initializer=tf.constant(0.,
-        shape=(output_size,)))
+      b_softmax = tf.get_variable('b_softmax',
+        initializer=tf.constant(0., shape=(output_size,)))
 
     with tf.variable_scope('value') as val_scope:
       W_linear = tf.get_variable('W_linear', shape=(W0_size, 1),
         initializer=init)
-      b_linear = tf.get_variable('b_linear', initializer=tf.constant(0.,
-        shape=(1,)))
+      b_linear = tf.get_variable('b_linear',
+        initializer=tf.constant(0., shape=(1,)))
 
+    # Variable collections for update computations
     shared_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
       scope=sv_scope.name)
     self.pol_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
@@ -46,23 +49,27 @@ class ThreadModel(object):
     self.val_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
       scope=val_scope.name) + shared_vars
 
+    # Global model stores the RMSProp moving averages
     if is_global:
       self.pol_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.pol_vars]
       self.val_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.val_vars]
 
+    # Thread models contain the evaluation and update logic
     if not is_global:
       h_1 = tf.tanh(tf.nn.bias_add(tf.matmul(self.ob, W0), b0))
 
-      self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(h_1, W_softmax),
-        b_softmax))
+      self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
+        h_1, W_softmax), b_softmax))
       self.val = tf.nn.bias_add(tf.matmul(h_1, W_linear), b_linear)
 
-      ac_oh = tf.reshape(tf.one_hot(self.ac, output_size), (-1, output_size))
-      masked_prob_na = tf.reduce_sum(ac_oh * self.pol_prob, reduction_indices=1)
+      actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
+        (-1, output_size))
+      masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
+        reduction_indices=1)
       score = tf.mul(tf.log(tf.clip_by_value(
-        masked_prob_na, 1.e-10, 1.0)), self.rew - self.val)
+        masked_prob, 1.e-10, 1.0)), self.rew - self.val)
       value_loss = tf.nn.l2_loss(self.rew - self.val)
 
       self.pol_grads = tf.gradients(score, self.pol_vars)
@@ -74,10 +81,10 @@ class ThreadModel(object):
         self.val_vars, self.val_grads, global_network.val_grad_msq)
 
   def get_updates(self, global_vars, local_vars, grads, grad_msq,
-                  momentum=0.9, epsilon=1e-9):
+                  momentum=0.9, epsilon=1e-9, grad_norm_clip=1.):
     updates = []
     for Wg, Wl, grad, msq in zip(global_vars, local_vars, grads, grad_msq):
-      grad = tf.clip_by_norm(grad, 1.)
+      grad = tf.clip_by_norm(grad, grad_norm_clip)
 
       # compute rmsprop update per variable
       ms_update = momentum * msq + (1. - momentum) * tf.pow(grad, 2)
@@ -91,7 +98,7 @@ class ThreadModel(object):
 
     return updates
 
-class LOLAgent(object):
+class ACAgent(object):
   def __init__(self, obs_space, action_space, **usercfg):
     self.nO = obs_space.shape[0]
     self.nA = action_space.n
@@ -117,7 +124,7 @@ class LOLAgent(object):
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
         thr_model = ThreadModel(self.nO, self.nA, global_model, False,
-            self.config)
+          self.config)
         self.thr_models.append(thr_model)
 
     self.sess = tf.Session()
@@ -152,8 +159,8 @@ class LOLAgent(object):
         if done:
           ravg.append(env_steps)
           ob = env.reset()
-          print('Thread: {} Steps: {} av100: {}'.format(
-            thread_id, env_steps, np.mean(ravg)))
+          print('Thread: {} Steps: {} av100: {} lr: {}'.format(
+            thread_id, env_steps, np.mean(ravg), lr))
           env_steps = 0
           break
 
@@ -172,7 +179,7 @@ class LOLAgent(object):
       obs = np.reshape(obs, (-1,self.nO))
       acts = np.reshape(acts, (-1,1))
       _, _ = self.sess.run([model.pol_updates, model.val_updates],
-          {model.ob:obs, model.ac:acts, model.rew:RR})
+        {model.ob:obs, model.ac:acts, model.rew:RR, model.lr:lr})
 
   def learn(self):
     ths = [threading.Thread(target=self.learning_thread, args=(i,)) for i in
@@ -183,7 +190,7 @@ class LOLAgent(object):
 
 def main():
     env = gym.make("CartPole-v0")
-    agent = LOLAgent(env.observation_space, env.action_space,
+    agent = ACAgent(env.observation_space, env.action_space,
       episode_max_length=10000, gamma=0.99, n_iter=1000000,
       num_threads=4, t_max=5, min_lr=0.0001, lr_decay_steps=30000)
     agent.learn()
