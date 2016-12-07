@@ -14,8 +14,7 @@ def categorical_sample(prob):
   return (csprob > np.random.rand()).argmax()
 
 class ThreadModel(object):
-  def __init__(self, input_size, output_size, global_network, is_global,
-               config):
+  def __init__(self, input_size, output_size, global_network, config):
     self.ob = tf.placeholder(tf.float32, (None, input_size), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
@@ -49,15 +48,14 @@ class ThreadModel(object):
     self.val_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
       scope=val_scope.name) + shared_vars
 
-    # Global model stores the RMSProp moving averages
-    if is_global:
+    # Global model stores the RMSProp moving averages.
+    # Thread models contain the evaluation and update logic.
+    if global_network is None:
       self.pol_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.pol_vars]
       self.val_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.val_vars]
-
-    # Thread models contain the evaluation and update logic
-    if not is_global:
+    else:
       h_1 = tf.tanh(tf.nn.bias_add(tf.matmul(self.ob, W0), b0))
 
       self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
@@ -118,13 +116,12 @@ class ACAgent(object):
     self.config.update(usercfg)
 
     with tf.variable_scope('global'):
-      global_model = ThreadModel(self.nO, self.nA, None, True, self.config)
+      global_model = ThreadModel(self.nO, self.nA, None, self.config)
 
     self.thr_models = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
-        thr_model = ThreadModel(self.nO, self.nA, global_model, False,
-          self.config)
+        thr_model = ThreadModel(self.nO, self.nA, global_model, self.config)
         self.thr_models.append(thr_model)
 
     self.sess = tf.Session()
