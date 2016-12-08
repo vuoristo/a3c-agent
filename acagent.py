@@ -107,10 +107,12 @@ class ACAgent(object):
         gamma = 0.98,
         lr = 0.01,
         min_lr = 0.002,
-        lr_decay_steps = 10000,
+        lr_decay_no_steps = 10000,
         hidden_1 = 20,
-        episode_max_length = 100,
+        num_rnn_cells = 16,
+        num_rnn_steps = 2,
         num_threads = 1,
+        env_name = '',
       )
 
     self.config.update(usercfg)
@@ -119,10 +121,12 @@ class ACAgent(object):
       global_model = ThreadModel(self.nO, self.nA, None, self.config)
 
     self.thr_models = []
+    self.envs = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
         thr_model = ThreadModel(self.nO, self.nA, global_model, self.config)
         self.thr_models.append(thr_model)
+      self.envs.append(gym.make(self.config['env_name']))
 
     self.sess = tf.Session()
     self.sess.run(tf.initialize_all_variables())
@@ -133,50 +137,56 @@ class ACAgent(object):
     return action
 
   def learning_thread(self, thread_id):
-    env = gym.make("CartPole-v0")
-    model = self.thr_models[thread_id]
-    ob = env.reset()
-    env_steps = 0
-    ravg = deque(maxlen=100)
+    t_max = self.config['t_max']
     lr = self.config['lr']
-    lr_decay_step = (lr - self.config['min_lr'])/self.config['lr_decay_steps']
+    min_lr = self.config['min_lr']
+    lr_decay_no_steps = self.config['lr_decay_no_steps']
+    lr_decay_step = (lr - min_lr)/lr_decay_no_steps
+    num_rnn_steps = self.config['num_rnn_steps']
+
+    env = self.envs[thread_id]
+    model = self.thr_models[thread_id]
+
+    obs = deque(maxlen=t_max)
+    acts = deque(maxlen=t_max)
+    rews = deque(maxlen=t_max)
+
+    t = 0
+    done = True
     for iteration in range(self.config['n_iter']):
-      obs = []
-      acts = []
-      rews = []
-      for t in range(self.config['t_max']):
-        a = self.act(ob, model)
-        ob, rew, done, _ = env.step(a)
-        obs.append(ob)
-        acts.append(a)
-        rews.append(rew)
-        env_steps += 1
-        if lr > self.config['min_lr']:
-          lr -= lr_decay_step
-        if done:
-          ravg.append(env_steps)
-          ob = env.reset()
-          print('Thread: {} Steps: {} av100: {} lr: {}'.format(
-            thread_id, env_steps, np.mean(ravg), lr))
-          env_steps = 0
-          break
-
       if done:
-        R = 0
+        t = 0
+        done = False
+        obs.clear()
+        ob = env.reset()
+        obs.extend([ob]*t_max)
       else:
-        R = self.sess.run(model.val, {model.ob:np.reshape(obs[-1],
-          (1,self.nO))})
+        action = self.act(ob, model)
+        acts.append(action)
+        ob, rew, done, _ = env.step(action)
+        obs.append(ob)
+        rews.append(rew)
+        t += 1
+        lr = lr - lr_decay_step if lr > min_lr else lr
 
-      RR = np.zeros((t+1, 1))
-      RR[-1, 0] = R
-      for i in reversed(range(t)):
-        RR[i, 0] = R
-        R = rews[i] + self.config['gamma'] * R
+      if done or t == t_max:
+        obs_padded = np.r_[[obs[0]] * (num_rnn_steps - 1), obs]
+        obs_windowed = [obs_padded[i:i+num_rnn_steps] for i in range(t)]
+        obs_arr = np.reshape(obs_windowed, (t, num_rnn_steps, self.nO))
+        acts_arr = np.reshape(acts, (t, 1))
 
-      obs = np.reshape(obs, (-1,self.nO))
-      acts = np.reshape(acts, (-1,1))
-      _, _ = self.sess.run([model.pol_updates, model.val_updates],
-        {model.ob:obs, model.ac:acts, model.rew:RR, model.lr:lr})
+        R = 0 if done else self.sess.run(model.val, {model.ob:obs_arr[-1,:,:]})
+        R_arr = np.zeros((t, 1))
+        R_arr[-1, 0] = R
+        for i in reversed(range(t)):
+          R = rews[i] + self.config['gamma'] * R
+          R_arr[i, 0] = R
+
+        _, _ = self.sess.run([model.pol_updates, model.val_updates],
+          {model.ob:obs_arr, model.ac:acts_arr, model.rew:R_arr, model.lr:lr})
+
+        acts.clear()
+        rews.clear()
 
   def learn(self):
     ths = [threading.Thread(target=self.learning_thread, args=(i,)) for i in
@@ -187,9 +197,9 @@ class ACAgent(object):
 
 def main():
     env = gym.make("CartPole-v0")
-    agent = ACAgent(env.observation_space, env.action_space,
-      episode_max_length=10000, gamma=0.99, n_iter=1000000,
-      num_threads=4, t_max=5, min_lr=0.0001, lr_decay_steps=30000)
+    agent = ACAgent(env.observation_space, env.action_space, gamma=0.99,
+      n_iter=10000, num_threads=1, t_max=5, min_lr=0.0001,
+      lr_decay_no_steps=30000, env_name='CartPole-v0')
     agent.learn()
 
 if __name__ == "__main__":
