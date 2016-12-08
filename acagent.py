@@ -15,18 +15,27 @@ def categorical_sample(prob):
 
 class ThreadModel(object):
   def __init__(self, input_size, output_size, global_network, config):
-    self.ob = tf.placeholder(tf.float32, (None, input_size), name='ob')
+    W0_size = config['hidden_1']
+    rnn_size = config['rnn_size']
+    num_rnn_cells = config['num_rnn_cells']
+    num_rnn_steps = config['num_rnn_steps']
+
+    self.ob = tf.placeholder(
+      tf.float32, (None, num_rnn_steps, input_size), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
     self.lr = tf.placeholder(tf.float32, name='lr')
 
-    W0_size = config['hidden_1']
-
     # Model variables
     with tf.variable_scope('shared_variables') as sv_scope:
       init = tf.uniform_unit_scaling_initializer()
-      W0 = tf.get_variable('W0', shape=(input_size, W0_size), initializer=init)
-      b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(W0_size,)))
+      self.W0 = tf.get_variable('W0', shape=(input_size, W0_size),
+        initializer=init)
+      self.b0 = tf.get_variable('b0', initializer=tf.constant(0.,
+        shape=(W0_size,)))
+
+      lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
+      cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_rnn_cells)
 
     with tf.variable_scope('policy') as pol_scope:
       W_softmax = tf.get_variable('W_softmax', shape=(W0_size, output_size),
@@ -56,11 +65,16 @@ class ThreadModel(object):
       self.val_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.val_vars]
     else:
-      h_1 = tf.tanh(tf.nn.bias_add(tf.matmul(self.ob, W0), b0))
+      obs_transposed = tf.transpose(self.ob, perm=(1,0,2))
+      hidden_states = tf.map_fn(self._compute_hidden_state, obs_transposed)
+      hs_transposed = tf.transpose(hidden_states, perm=(1,0,2))
+      rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
+        hs_transposed)]
+      rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
 
       self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
-        h_1, W_softmax), b_softmax))
-      self.val = tf.nn.bias_add(tf.matmul(h_1, W_linear), b_linear)
+        rnn_outputs[-1], W_softmax), b_softmax))
+      self.val = tf.nn.bias_add(tf.matmul(rnn_outputs[-1], W_linear), b_linear)
 
       actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
         (-1, output_size))
@@ -77,6 +91,9 @@ class ThreadModel(object):
         self.pol_vars, self.pol_grads, global_network.pol_grad_msq)
       self.val_updates = self.get_updates(global_network.val_vars,
         self.val_vars, self.val_grads, global_network.val_grad_msq)
+
+  def _compute_hidden_state(self, observation):
+    return tf.tanh(tf.nn.bias_add(tf.matmul(observation, self.W0), self.b0))
 
   def get_updates(self, global_vars, local_vars, grads, grad_msq,
                   momentum=0.9, epsilon=1e-9, grad_norm_clip=1.):
@@ -97,10 +114,7 @@ class ThreadModel(object):
     return updates
 
 class ACAgent(object):
-  def __init__(self, obs_space, action_space, **usercfg):
-    self.nO = obs_space.shape[0]
-    self.nA = action_space.n
-
+  def __init__(self, **usercfg):
     self.config = dict(
         n_iter = 100,
         t_max = 10,
@@ -109,7 +123,8 @@ class ACAgent(object):
         min_lr = 0.002,
         lr_decay_no_steps = 10000,
         hidden_1 = 20,
-        num_rnn_cells = 16,
+        rnn_size = 20,
+        num_rnn_cells = 1,
         num_rnn_steps = 2,
         num_threads = 1,
         env_name = '',
@@ -117,22 +132,27 @@ class ACAgent(object):
 
     self.config.update(usercfg)
 
+    self.envs = [gym.make(self.config['env_name']) for _ in
+        range(self.config['num_threads'])]
+    self.nO = self.envs[0].observation_space.shape[0]
+    self.nA = self.envs[0].action_space.n
+
     with tf.variable_scope('global'):
       global_model = ThreadModel(self.nO, self.nA, None, self.config)
 
     self.thr_models = []
-    self.envs = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
         thr_model = ThreadModel(self.nO, self.nA, global_model, self.config)
         self.thr_models.append(thr_model)
-      self.envs.append(gym.make(self.config['env_name']))
 
     self.sess = tf.Session()
     self.sess.run(tf.initialize_all_variables())
 
-  def act(self, ob, model):
-    prob = self.sess.run(model.pol_prob, {model.ob:np.reshape(ob, (1, -1))})
+  def act(self, obs, model):
+    w_size = self.config['num_rnn_steps']
+    ob = np.reshape(obs[-w_size-1:-1], (1,w_size,-1))
+    prob = self.sess.run(model.pol_prob, {model.ob:ob})
     action = categorical_sample(prob)
     return action
 
@@ -142,7 +162,7 @@ class ACAgent(object):
     min_lr = self.config['min_lr']
     lr_decay_no_steps = self.config['lr_decay_no_steps']
     lr_decay_step = (lr - min_lr)/lr_decay_no_steps
-    num_rnn_steps = self.config['num_rnn_steps']
+    w_size = self.config['num_rnn_steps']
 
     env = self.envs[thread_id]
     model = self.thr_models[thread_id]
@@ -151,31 +171,41 @@ class ACAgent(object):
     acts = deque(maxlen=t_max)
     rews = deque(maxlen=t_max)
 
+    ep_rews = 0
+    ep_count = 0
+    rews_acc = deque(maxlen=100)
+
     t = 0
     done = True
     for iteration in range(self.config['n_iter']):
       if done:
-        t = 0
         done = False
         obs.clear()
         ob = env.reset()
         obs.extend([ob]*t_max)
+
+        rews_acc.append(ep_rews)
+        ep_rews = 0
+        ep_count += 1
+        print('Episode: {} Avg100: {}'.format(ep_count, np.mean(rews_acc)))
       else:
-        action = self.act(ob, model)
+        action = self.act(list(obs), model)
         acts.append(action)
         ob, rew, done, _ = env.step(action)
         obs.append(ob)
         rews.append(rew)
         t += 1
         lr = lr - lr_decay_step if lr > min_lr else lr
+        ep_rews += rew
 
       if done or t == t_max:
-        obs_padded = np.r_[[obs[0]] * (num_rnn_steps - 1), obs]
-        obs_windowed = [obs_padded[i:i+num_rnn_steps] for i in range(t)]
-        obs_arr = np.reshape(obs_windowed, (t, num_rnn_steps, self.nO))
+        obs_padded = np.r_[[obs[0]] * (w_size - 1), obs]
+        obs_windowed = [obs_padded[i:i+w_size] for i in range(t)]
+        obs_arr = np.reshape(obs_windowed, (t, w_size, self.nO))
         acts_arr = np.reshape(acts, (t, 1))
 
-        R = 0 if done else self.sess.run(model.val, {model.ob:obs_arr[-1,:,:]})
+        last_ob = np.reshape(obs_arr[-1,:,:], (1, w_size, -1))
+        R = 0 if done else self.sess.run(model.val, {model.ob:last_ob})
         R_arr = np.zeros((t, 1))
         R_arr[-1, 0] = R
         for i in reversed(range(t)):
@@ -187,6 +217,7 @@ class ACAgent(object):
 
         acts.clear()
         rews.clear()
+        t = 0
 
   def learn(self):
     ths = [threading.Thread(target=self.learning_thread, args=(i,)) for i in
@@ -196,10 +227,9 @@ class ACAgent(object):
       t.start()
 
 def main():
-    env = gym.make("CartPole-v0")
-    agent = ACAgent(env.observation_space, env.action_space, gamma=0.99,
-      n_iter=10000, num_threads=1, t_max=5, min_lr=0.0001,
-      lr_decay_no_steps=30000, env_name='CartPole-v0')
+    agent = ACAgent(gamma=0.99, n_iter=100000, num_threads=4, t_max=5,
+        min_lr=0.0001, lr_decay_no_steps=30000, num_rnn_cells=1,
+        num_rnn_steps=4, env_name='CartPole-v0')
     agent.learn()
 
 if __name__ == "__main__":
