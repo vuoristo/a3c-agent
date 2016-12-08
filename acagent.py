@@ -26,7 +26,6 @@ class ThreadModel(object):
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
     self.lr = tf.placeholder(tf.float32, name='lr')
 
-    # Model variables
     with tf.variable_scope('shared_variables') as sv_scope:
       init = tf.uniform_unit_scaling_initializer()
       self.W0 = tf.get_variable('W0', shape=(input_size, W0_size),
@@ -36,6 +35,13 @@ class ThreadModel(object):
 
       lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
       cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_rnn_cells)
+
+      obs_transposed = tf.transpose(self.ob, perm=(1,0,2))
+      hidden_states = tf.map_fn(self._compute_hidden_state, obs_transposed)
+      hs_transposed = tf.transpose(hidden_states, perm=(1,0,2))
+      rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
+        hs_transposed)]
+      rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
 
     with tf.variable_scope('policy') as pol_scope:
       W_softmax = tf.get_variable('W_softmax', shape=(W0_size, output_size),
@@ -65,13 +71,6 @@ class ThreadModel(object):
       self.val_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.val_vars]
     else:
-      obs_transposed = tf.transpose(self.ob, perm=(1,0,2))
-      hidden_states = tf.map_fn(self._compute_hidden_state, obs_transposed)
-      hs_transposed = tf.transpose(hidden_states, perm=(1,0,2))
-      rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
-        hs_transposed)]
-      rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
-
       self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
         rnn_outputs[-1], W_softmax), b_softmax))
       self.val = tf.nn.bias_add(tf.matmul(rnn_outputs[-1], W_linear), b_linear)
