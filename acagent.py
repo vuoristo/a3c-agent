@@ -83,7 +83,7 @@ class ThreadModel(object):
         masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
           reduction_indices=1)
         score = tf.mul(tf.log(tf.clip_by_value(
-          masked_prob, 1.e-10, 1.0)), self.rew - self.val)
+          masked_prob, 1.e-10, 1.0)), tf.transpose(self.rew - self.val))
         value_loss = tf.nn.l2_loss(self.rew - self.val)
 
       with tf.name_scope('gradients'):
