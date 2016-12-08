@@ -71,25 +71,32 @@ class ThreadModel(object):
       self.val_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.val_vars]
     else:
-      self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
-        rnn_outputs[-1], W_softmax), b_softmax))
-      self.val = tf.nn.bias_add(tf.matmul(rnn_outputs[-1], W_linear), b_linear)
+      with tf.name_scope('outputs'):
+        self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
+          rnn_outputs[-1], W_softmax), b_softmax))
+        self.val = tf.nn.bias_add(tf.matmul(rnn_outputs[-1], W_linear),
+          b_linear)
 
-      actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
-        (-1, output_size))
-      masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
-        reduction_indices=1)
-      score = tf.mul(tf.log(tf.clip_by_value(
-        masked_prob, 1.e-10, 1.0)), self.rew - self.val)
-      value_loss = tf.nn.l2_loss(self.rew - self.val)
+      with tf.name_scope('targets'):
+        actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
+          (-1, output_size))
+        masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
+          reduction_indices=1)
+        score = tf.mul(tf.log(tf.clip_by_value(
+          masked_prob, 1.e-10, 1.0)), self.rew - self.val)
+        value_loss = tf.nn.l2_loss(self.rew - self.val)
 
-      self.pol_grads = tf.gradients(score, self.pol_vars)
-      self.val_grads = tf.gradients(value_loss, self.val_vars)
+      with tf.name_scope('gradients'):
+        self.pol_grads = tf.gradients(score, self.pol_vars,
+          name='gradients_pol')
+        self.val_grads = tf.gradients(value_loss, self.val_vars,
+          name='gradients_val')
 
-      self.pol_updates = self.get_updates(global_network.pol_vars,
-        self.pol_vars, self.pol_grads, global_network.pol_grad_msq)
-      self.val_updates = self.get_updates(global_network.val_vars,
-        self.val_vars, self.val_grads, global_network.val_grad_msq)
+      with tf.name_scope('updates'):
+        self.pol_updates = self.get_updates(global_network.pol_vars,
+          self.pol_vars, self.pol_grads, global_network.pol_grad_msq)
+        self.val_updates = self.get_updates(global_network.val_vars,
+          self.val_vars, self.val_grads, global_network.val_grad_msq)
 
   def _compute_hidden_state(self, observation):
     return tf.tanh(tf.nn.bias_add(tf.matmul(observation, self.W0), self.b0))
