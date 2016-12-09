@@ -23,7 +23,7 @@ class ThreadModel(object):
     grad_norm_clip_val = config['grad_norm_clip_val']
 
     self.ob = tf.placeholder(
-      tf.float32, (None, num_rnn_steps, input_size), name='ob')
+      tf.float32, (None, input_size), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
     self.lr = tf.placeholder(tf.float32, name='lr')
@@ -38,11 +38,11 @@ class ThreadModel(object):
       lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
       cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_rnn_cells)
 
-      obs_transposed = tf.transpose(self.ob, perm=(1,0,2))
-      hidden_states = tf.map_fn(self._compute_hidden_state, obs_transposed)
-      hs_transposed = tf.transpose(hidden_states, perm=(1,0,2))
+      hidden_states = tf.tanh(tf.nn.bias_add(tf.matmul(self.ob, self.W0),
+        self.b0))
+      hs_reshaped = tf.reshape(hidden_states, (-1, num_rnn_steps, W0_size))
       rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
-        hs_transposed)]
+        hs_reshaped)]
       rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
 
     with tf.variable_scope('policy') as pol_scope:
@@ -104,9 +104,6 @@ class ThreadModel(object):
           self.val_vars, self.val_grads, global_network.val_grad_msq,
           grad_norm_clip=grad_norm_clip_val)
 
-  def _compute_hidden_state(self, observation):
-    return tf.tanh(tf.nn.bias_add(tf.matmul(observation, self.W0), self.b0))
-
   def get_updates(self, global_vars, local_vars, grads, grad_msq,
                   momentum=0.99, epsilon=0.1,
                   grad_norm_clip=10.):
@@ -166,7 +163,7 @@ class ACAgent(object):
 
   def act(self, obs, model):
     w_size = self.config['num_rnn_steps']
-    ob = np.reshape(obs[-w_size-1:-1], (1,w_size,-1))
+    ob = np.reshape(obs[-w_size:], (w_size,-1))
     prob = self.sess.run(model.pol_prob, {model.ob:ob})
     action = categorical_sample(prob)
     return action
@@ -182,7 +179,7 @@ class ACAgent(object):
     env = self.envs[thread_id]
     model = self.thr_models[thread_id]
 
-    obs = deque(maxlen=t_max)
+    obs = deque(maxlen=t_max+w_size-1)
     acts = deque(maxlen=t_max)
     rews = deque(maxlen=t_max)
 
@@ -195,9 +192,9 @@ class ACAgent(object):
     for iteration in range(self.config['n_iter']):
       if done:
         done = False
-        obs.clear()
         ob = env.reset()
-        obs.extend([ob]*t_max)
+        obs.extend([ob]*(t_max+w_size-1))
+        obs.append(ob)
 
         rews_acc.append(ep_rews)
         ep_rews = 0
@@ -214,13 +211,17 @@ class ACAgent(object):
         ep_rews += rew
 
       if done or t == t_max:
-        obs_padded = np.r_[[obs[0]] * (w_size - 1), obs]
-        obs_windowed = [obs_padded[i:i+w_size] for i in range(t)]
-        obs_arr = np.reshape(obs_windowed, (t, w_size, self.nO))
+        # TODO: move to model code to avoid duplicate network evaluation
+        obs_windowed = [list(obs)[i:i+w_size] for i in range(t)]
+        obs_arr = np.reshape(obs_windowed, (t*w_size, self.nO))
         acts_arr = np.reshape(acts, (t, 1))
 
-        last_ob = np.reshape(obs_arr[-1,:,:], (1, w_size, -1))
-        R = 0 if done else self.sess.run(model.val, {model.ob:last_ob})
+        if done:
+          R = 0
+        else:
+          last_ob = obs_arr[-w_size:,:]
+          R = self.sess.run(model.val, {model.ob:last_ob})
+
         R_arr = np.zeros((t, 1))
         R_arr[-1, 0] = R
         for i in reversed(range(t)):
