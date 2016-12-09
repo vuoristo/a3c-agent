@@ -19,6 +19,8 @@ class ThreadModel(object):
     rnn_size = config['rnn_size']
     num_rnn_cells = config['num_rnn_cells']
     num_rnn_steps = config['num_rnn_steps']
+    entropy_beta = config['entropy_beta']
+    grad_norm_clip_val = config['grad_norm_clip_val']
 
     self.ob = tf.placeholder(
       tf.float32, (None, num_rnn_steps, input_size), name='ob')
@@ -82,9 +84,11 @@ class ThreadModel(object):
           (-1, output_size))
         masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
           reduction_indices=1)
-        score = tf.mul(tf.log(tf.clip_by_value(
-          masked_prob, 1.e-10, 1.0)), tf.transpose(self.rew - self.val))
-        value_loss = tf.nn.l2_loss(self.rew - self.val)
+        log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-10, 1.0))
+        entropy = -tf.reduce_sum(masked_prob * log_masked_prob)
+        score = tf.reduce_sum(tf.transpose(tf.mul(log_masked_prob,
+          tf.transpose(self.rew - self.val)))) + entropy * entropy_beta
+        value_loss = 0.5 * tf.nn.l2_loss(self.rew - self.val)
 
       with tf.name_scope('gradients'):
         self.pol_grads = tf.gradients(score, self.pol_vars,
@@ -129,11 +133,13 @@ class ACAgent(object):
         min_lr = 0.002,
         lr_decay_no_steps = 10000,
         hidden_1 = 20,
-        rnn_size = 20,
+        rnn_size = 10,
         num_rnn_cells = 1,
-        num_rnn_steps = 2,
+        num_rnn_steps = 1,
         num_threads = 1,
         env_name = '',
+        entropy_beta = 0.01,
+        grad_norm_clip_val = 50.,
       )
 
     self.config.update(usercfg)
