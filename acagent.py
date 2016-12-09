@@ -44,13 +44,13 @@ class ThreadModel(object):
       rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
 
     with tf.variable_scope('policy') as pol_scope:
-      W_softmax = tf.get_variable('W_softmax', shape=(W0_size, output_size),
+      W_softmax = tf.get_variable('W_softmax', shape=(rnn_size, output_size),
         initializer=init)
       b_softmax = tf.get_variable('b_softmax',
         initializer=tf.constant(0., shape=(output_size,)))
 
     with tf.variable_scope('value') as val_scope:
-      W_linear = tf.get_variable('W_linear', shape=(W0_size, 1),
+      W_linear = tf.get_variable('W_linear', shape=(rnn_size, 1),
         initializer=init)
       b_linear = tf.get_variable('b_linear',
         initializer=tf.constant(0., shape=(1,)))
