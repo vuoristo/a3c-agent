@@ -98,15 +98,18 @@ class ThreadModel(object):
 
       with tf.name_scope('updates'):
         self.pol_updates = self.get_updates(global_network.pol_vars,
-          self.pol_vars, self.pol_grads, global_network.pol_grad_msq)
+          self.pol_vars, self.pol_grads, global_network.pol_grad_msq,
+          grad_norm_clip=grad_norm_clip_val)
         self.val_updates = self.get_updates(global_network.val_vars,
-          self.val_vars, self.val_grads, global_network.val_grad_msq)
+          self.val_vars, self.val_grads, global_network.val_grad_msq,
+          grad_norm_clip=grad_norm_clip_val)
 
   def _compute_hidden_state(self, observation):
     return tf.tanh(tf.nn.bias_add(tf.matmul(observation, self.W0), self.b0))
 
   def get_updates(self, global_vars, local_vars, grads, grad_msq,
-                  momentum=0.9, epsilon=1e-9, grad_norm_clip=1.):
+                  momentum=0.99, epsilon=0.1,
+                  grad_norm_clip=10.):
     updates = []
     for Wg, Wl, grad, msq in zip(global_vars, local_vars, grads, grad_msq):
       grad = tf.clip_by_norm(grad, grad_norm_clip)
