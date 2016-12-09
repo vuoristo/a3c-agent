@@ -26,7 +26,7 @@ class ThreadModel(object):
       tf.float32, (None, input_size), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
-    self.lr = tf.placeholder(tf.float32, name='lr')
+    self.lr = tf.placeholder(tf.float32, (1,), name='lr')
 
     with tf.variable_scope('shared_variables') as sv_scope:
       init = tf.uniform_unit_scaling_initializer()
@@ -197,9 +197,10 @@ class ACAgent(object):
         obs.append(ob)
 
         rews_acc.append(ep_rews)
-        ep_rews = 0
         ep_count += 1
-        print('Episode: {} Avg100: {}'.format(ep_count, np.mean(rews_acc)))
+        print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
+              '{}'.format(thread_id, ep_count, ep_rews, np.mean(rews_acc)))
+        ep_rews = 0
       else:
         action = self.act(list(obs), model)
         acts.append(action)
@@ -229,7 +230,8 @@ class ACAgent(object):
           R_arr[i, 0] = R
 
         _, _ = self.sess.run([model.pol_updates, model.val_updates],
-          {model.ob:obs_arr, model.ac:acts_arr, model.rew:R_arr, model.lr:lr})
+          {model.ob:obs_arr, model.ac:acts_arr, model.rew:R_arr,
+           model.lr:np.reshape(lr, (1,))})
 
         acts.clear()
         rews.clear()
@@ -243,9 +245,9 @@ class ACAgent(object):
       t.start()
 
 def main():
-    agent = ACAgent(gamma=0.99, n_iter=100000, num_threads=4, t_max=5,
-        min_lr=0.0001, lr_decay_no_steps=30000, num_rnn_cells=1,
-        num_rnn_steps=4, env_name='CartPole-v0')
+    agent = ACAgent(gamma=0.99, n_iter=100000, num_threads=8, t_max=5,
+        lr=0.001, min_lr=0.0001, lr_decay_no_steps=30000, hidden_1=20,
+        rnn_size=10, num_rnn_cells=1, num_rnn_steps=2, env_name='CartPole-v0')
     agent.learn()
 
 if __name__ == "__main__":
