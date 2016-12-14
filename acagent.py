@@ -86,9 +86,10 @@ class ThreadModel(object):
           reduction_indices=1)
         log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-10, 1.0))
         entropy = -tf.reduce_sum(masked_prob * log_masked_prob)
-        score = tf.reduce_sum(tf.transpose(tf.mul(log_masked_prob,
-          tf.transpose(self.rew - self.val)))) + entropy * entropy_beta
-        value_loss = 0.5 * tf.nn.l2_loss(self.rew - self.val)
+        td_error = tf.transpose(self.rew - self.val)
+        score = tf.reduce_sum(tf.transpose(tf.mul(log_masked_prob, td_error)) +
+          entropy * entropy_beta)
+        value_loss = 0.5 * tf.nn.l2_loss(td_error)
 
       with tf.name_scope('gradients'):
         self.pol_grads = tf.gradients(score, self.pol_vars,
