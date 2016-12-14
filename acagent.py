@@ -38,7 +38,7 @@ class ThreadModel(object):
       lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
       cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_rnn_cells)
 
-      hidden_states = tf.tanh(tf.nn.bias_add(tf.matmul(self.ob, self.W0),
+      hidden_states = tf.nn.relu(tf.nn.bias_add(tf.matmul(self.ob, self.W0),
         self.b0))
       hs_reshaped = tf.reshape(hidden_states, (-1, num_rnn_steps, W0_size))
       rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
