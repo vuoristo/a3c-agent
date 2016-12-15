@@ -23,8 +23,7 @@ class ThreadModel(object):
     grad_norm_clip_val = config['grad_norm_clip_val']
     use_rnn = config['use_rnn']
 
-    self.ob = tf.placeholder(
-      tf.float32, (None, input_size), name='ob')
+    self.ob = tf.placeholder(tf.float32, (None, input_size), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
     self.lr = tf.placeholder(tf.float32, (1,), name='lr')
@@ -91,10 +90,9 @@ class ThreadModel(object):
         masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
           reduction_indices=1)
         log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-10, 1.0))
-        entropy = -tf.reduce_sum(masked_prob * log_masked_prob)
+        entropy = -tf.reduce_sum(masked_prob * log_masked_prob) * entropy_beta
         td_error = tf.transpose(self.rew - self.val)
-        score = tf.reduce_sum(tf.transpose(tf.mul(log_masked_prob, td_error)) +
-          entropy * entropy_beta)
+        score = tf.reduce_sum(tf.mul(log_masked_prob, td_error)) + entropy
         value_loss = 0.5 * tf.nn.l2_loss(td_error)
 
       with tf.name_scope('gradients'):
