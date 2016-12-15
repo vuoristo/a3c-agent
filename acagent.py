@@ -110,14 +110,13 @@ class ThreadModel(object):
           grad_norm_clip=grad_norm_clip_val)
 
   def get_updates(self, global_vars, local_vars, grads, grad_msq,
-                  momentum=0.99, epsilon=0.1,
-                  grad_norm_clip=10.):
+                  decay=0.9, epsilon=1e-10, grad_norm_clip=10.):
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
       grad = tf.clip_by_norm(grad, grad_norm_clip)
 
       # compute rmsprop update per variable
-      ms_update = momentum * msq + (1. - momentum) * tf.pow(grad, 2)
+      ms_update = decay * msq + (1. - decay) * tf.pow(grad, 2)
       gradient_update = -self.lr * grad / tf.sqrt(ms_update + epsilon)
 
       # apply updates to global variables
@@ -204,7 +203,6 @@ class ACAgent(object):
         done = False
         ob = env.reset()
         obs.extend([ob]*(t_max+w_size-1))
-        obs.append(ob)
 
         rews_acc.append(ep_rews)
         ep_count += 1
