@@ -21,6 +21,7 @@ class ThreadModel(object):
     num_rnn_steps = config['num_rnn_steps']
     entropy_beta = config['entropy_beta']
     grad_norm_clip_val = config['grad_norm_clip_val']
+    use_rnn = config['use_rnn']
 
     self.ob = tf.placeholder(
       tf.float32, (None, input_size), name='ob')
@@ -30,29 +31,34 @@ class ThreadModel(object):
 
     with tf.variable_scope('shared_variables') as sv_scope:
       init = tf.uniform_unit_scaling_initializer()
-      self.W0 = tf.get_variable('W0', shape=(input_size, W0_size),
-        initializer=init)
-      self.b0 = tf.get_variable('b0', initializer=tf.constant(0.,
-        shape=(W0_size,)))
+      W0 = tf.get_variable('W0', shape=(input_size, W0_size), initializer=init)
+      b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(W0_size,)))
+      W1 = tf.get_variable('W1', shape=(W0_size, W0_size), initializer=init)
+      b1 = tf.get_variable('b1', initializer=tf.constant(0., shape=(W0_size,)))
+      h0 = tf.nn.relu(tf.nn.bias_add(tf.matmul(self.ob, W0), b0))
+      h1 = tf.nn.relu(tf.nn.bias_add(tf.matmul(h0, W1), b1))
 
-      lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
-      cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_rnn_cells)
+      nn_output_size = W0_size
+      nn_outputs = h1
 
-      hidden_states = tf.nn.relu(tf.nn.bias_add(tf.matmul(self.ob, self.W0),
-        self.b0))
-      hs_reshaped = tf.reshape(hidden_states, (-1, num_rnn_steps, W0_size))
-      rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
-        hs_reshaped)]
-      rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
+      if use_rnn:
+        lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
+        cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_rnn_cells)
+        hs_reshaped = tf.reshape(h1, (-1, num_rnn_steps, W0_size))
+        rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
+          hs_reshaped)]
+        rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
+        nn_output_size = rnn_size
+        nn_outputs = rnn_outputs[-1]
 
     with tf.variable_scope('policy') as pol_scope:
-      W_softmax = tf.get_variable('W_softmax', shape=(rnn_size, output_size),
-        initializer=init)
+      W_softmax = tf.get_variable('W_softmax', shape=(nn_output_size,
+        output_size), initializer=init)
       b_softmax = tf.get_variable('b_softmax',
         initializer=tf.constant(0., shape=(output_size,)))
 
     with tf.variable_scope('value') as val_scope:
-      W_linear = tf.get_variable('W_linear', shape=(rnn_size, 1),
+      W_linear = tf.get_variable('W_linear', shape=(nn_output_size, 1),
         initializer=init)
       b_linear = tf.get_variable('b_linear',
         initializer=tf.constant(0., shape=(1,)))
@@ -75,8 +81,8 @@ class ThreadModel(object):
     else:
       with tf.name_scope('outputs'):
         self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
-          rnn_outputs[-1], W_softmax), b_softmax))
-        self.val = tf.nn.bias_add(tf.matmul(rnn_outputs[-1], W_linear),
+          nn_outputs, W_softmax), b_softmax))
+        self.val = tf.nn.bias_add(tf.matmul(nn_outputs, W_linear),
           b_linear)
 
       with tf.name_scope('targets'):
@@ -135,6 +141,7 @@ class ACAgent(object):
         lr_decay_no_steps = 10000,
         hidden_1 = 20,
         rnn_size = 10,
+        use_rnn = True,
         num_rnn_cells = 1,
         num_rnn_steps = 1,
         num_threads = 1,
