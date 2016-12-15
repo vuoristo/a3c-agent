@@ -202,7 +202,8 @@ class ACAgent(object):
       if done:
         done = False
         ob = env.reset()
-        obs.extend([ob]*(t_max+w_size-1))
+        obs.clear()
+        obs.extend([ob]*(w_size))
 
         rews_acc.append(ep_rews)
         ep_count += 1
