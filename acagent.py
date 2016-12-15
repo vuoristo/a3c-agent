@@ -113,18 +113,22 @@ class ThreadModel(object):
                   momentum=0.99, epsilon=0.1,
                   grad_norm_clip=10.):
     updates = []
-    for Wg, Wl, grad, msq in zip(global_vars, local_vars, grads, grad_msq):
+    for Wg, grad, msq in zip(global_vars, grads, grad_msq):
       grad = tf.clip_by_norm(grad, grad_norm_clip)
 
       # compute rmsprop update per variable
       ms_update = momentum * msq + (1. - momentum) * tf.pow(grad, 2)
       gradient_update = -self.lr * grad / tf.sqrt(ms_update + epsilon)
 
-      # apply updates to global variables, copy back to local variables
+      # apply updates to global variables
       l_to_g = Wg.assign_add(gradient_update)
-      g_to_l = Wl.assign(Wg)
 
-      updates += [l_to_g, g_to_l, ms_update]
+      updates += [l_to_g]
+
+    with tf.control_dependencies(updates):
+      for Wg, Wl in zip(global_vars, local_vars):
+        g_to_l = Wl.assign(Wg)
+        updates += [g_to_l]
 
     return updates
 
