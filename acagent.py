@@ -233,7 +233,7 @@ class ACAgent(object):
 
         R_arr = np.zeros((t, 1))
         R_arr[-1, 0] = R
-        for i in reversed(range(t)):
+        for i in reversed(range(t-1)):
           R = rews[i] + self.config['gamma'] * R
           R_arr[i, 0] = R
 
