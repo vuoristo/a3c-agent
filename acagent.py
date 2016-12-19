@@ -22,13 +22,14 @@ class ThreadModel(object):
     entropy_beta = config['entropy_beta']
     grad_norm_clip_val = config['grad_norm_clip_val']
     use_rnn = config['use_rnn']
+    rms_decay = config['rms_decay']
 
     self.ob = tf.placeholder(tf.float32, (None, input_size), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
-    self.lr = tf.placeholder(tf.float32, (1,), name='lr')
+    self.lr = tf.placeholder(tf.float32, name='lr')
 
-    with tf.variable_scope('shared_variables') as sv_scope:
+    with tf.variable_scope('policy_value_network') as thread_scope:
       init = tf.uniform_unit_scaling_initializer()
       W0 = tf.get_variable('W0', shape=(input_size, W0_size), initializer=init)
       b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(W0_size,)))
@@ -50,33 +51,25 @@ class ThreadModel(object):
         nn_output_size = rnn_size
         nn_outputs = rnn_outputs[-1]
 
-    with tf.variable_scope('policy') as pol_scope:
       W_softmax = tf.get_variable('W_softmax', shape=(nn_output_size,
         output_size), initializer=init)
       b_softmax = tf.get_variable('b_softmax',
         initializer=tf.constant(0., shape=(output_size,)))
 
-    with tf.variable_scope('value') as val_scope:
       W_linear = tf.get_variable('W_linear', shape=(nn_output_size, 1),
         initializer=init)
       b_linear = tf.get_variable('b_linear',
         initializer=tf.constant(0., shape=(1,)))
 
     # Variable collections for update computations
-    shared_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
-      scope=sv_scope.name)
-    self.pol_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
-      scope=pol_scope.name) + shared_vars
-    self.val_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
-      scope=val_scope.name) + shared_vars
+    self.trainable_variables = tf.get_collection(
+      tf.GraphKeys.TRAINABLE_VARIABLES, scope=thread_scope.name)
 
     # Global model stores the RMSProp moving averages.
     # Thread models contain the evaluation and update logic.
     if global_network is None:
-      self.pol_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
-        dtype=np.float32)) for var in self.pol_vars]
-      self.val_grad_msq = [tf.Variable(np.zeros(var.get_shape(),
-        dtype=np.float32)) for var in self.val_vars]
+      self.gradient_mean_square = [tf.Variable(np.zeros(var.get_shape(),
+        dtype=np.float32)) for var in self.trainable_variables]
     else:
       with tf.name_scope('outputs'):
         self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
@@ -88,41 +81,33 @@ class ThreadModel(object):
         actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
           (-1, output_size))
         masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
-          reduction_indices=1)
+          reduction_indices=1, keep_dims=True)
         log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-10, 1.0))
-        entropy = -tf.reduce_sum(masked_prob * log_masked_prob) * entropy_beta
-        td_error = tf.transpose(self.rew - self.val)
-        score = tf.reduce_sum(tf.mul(log_masked_prob, td_error)) + entropy
-        value_loss = 0.5 * tf.nn.l2_loss(td_error)
+        td_error = self.rew - self.val
+        policy_loss = -log_masked_prob * td_error
+        value_loss = tf.nn.l2_loss(td_error)
+        total_loss = tf.reduce_mean(policy_loss + 0.5 * value_loss)
 
       with tf.name_scope('gradients'):
-        self.pol_grads = tf.gradients(score, self.pol_vars,
-          name='gradients_pol')
-        self.val_grads = tf.gradients(value_loss, self.val_vars,
-          name='gradients_val')
+        self.grads = tf.gradients(total_loss, self.trainable_variables)
 
       with tf.name_scope('updates'):
-        self.pol_updates = self.get_updates(global_network.pol_vars,
-          self.pol_vars, self.pol_grads, global_network.pol_grad_msq,
-          grad_norm_clip=grad_norm_clip_val)
-        self.val_updates = self.get_updates(global_network.val_vars,
-          self.val_vars, self.val_grads, global_network.val_grad_msq,
-          grad_norm_clip=grad_norm_clip_val)
+        self.updates = self.get_updates(global_network.trainable_variables,
+          self.trainable_variables, self.grads,
+          global_network.gradient_mean_square, decay=rms_decay)
 
   def get_updates(self, global_vars, local_vars, grads, grad_msq,
                   decay=0.9, epsilon=1e-10, grad_norm_clip=10.):
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
-      grad = tf.clip_by_norm(grad, grad_norm_clip)
-
       # compute rmsprop update per variable
-      ms_update = decay * msq + (1. - decay) * tf.pow(grad, 2)
-      gradient_update = -self.lr * grad / tf.sqrt(ms_update + epsilon)
+      msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
+      with tf.control_dependencies([msq_update]):
+        gradient_update = -self.lr * grad / tf.sqrt(msq + epsilon)
+        l_to_g = Wg.assign_add(gradient_update)
 
       # apply updates to global variables
-      l_to_g = Wg.assign_add(gradient_update)
-
-      updates += [l_to_g]
+      updates += [gradient_update, l_to_g, msq_update]
 
     with tf.control_dependencies(updates):
       for Wg, Wl in zip(global_vars, local_vars):
@@ -148,13 +133,14 @@ class ACAgent(object):
         num_threads = 1,
         env_name = '',
         entropy_beta = 0.01,
-        grad_norm_clip_val = 50.,
+        grad_norm_clip_val = 100.,
+        rms_decay = 0.99,
       )
 
     self.config.update(usercfg)
 
     self.envs = [gym.make(self.config['env_name']) for _ in
-        range(self.config['num_threads'])]
+      range(self.config['num_threads'])]
     self.nO = self.envs[0].observation_space.shape[0]
     self.nA = self.envs[0].action_space.n
 
@@ -170,9 +156,7 @@ class ACAgent(object):
     self.sess = tf.Session()
     self.sess.run(tf.initialize_all_variables())
 
-  def act(self, obs, model):
-    w_size = self.config['num_rnn_steps']
-    ob = np.reshape(obs[-w_size:], (w_size,-1))
+  def act(self, ob, model):
     prob = self.sess.run(model.pol_prob, {model.ob:ob})
     action = categorical_sample(prob)
     return action
@@ -188,9 +172,10 @@ class ACAgent(object):
     env = self.envs[thread_id]
     model = self.thr_models[thread_id]
 
-    obs = deque(maxlen=t_max+w_size-1)
-    acts = deque(maxlen=t_max)
-    rews = deque(maxlen=t_max)
+    ob_shape = env.observation_space.shape
+    obs = np.zeros((t_max, *ob_shape))
+    acts = np.zeros((t_max))
+    rews = np.zeros((t_max))
 
     ep_rews = 0
     ep_count = 0
@@ -202,48 +187,45 @@ class ACAgent(object):
       if done:
         done = False
         ob = env.reset()
-        obs.clear()
-        obs.extend([ob]*(w_size))
-
+        ob = np.reshape(ob, (1, *ob_shape))
         rews_acc.append(ep_rews)
         ep_count += 1
         print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
-              '{}'.format(thread_id, ep_count, ep_rews, np.mean(rews_acc)))
+              '{:.1f} lr: {}'.format(thread_id, ep_count, ep_rews,
+              np.mean(rews_acc), lr))
         ep_rews = 0
       else:
-        action = self.act(list(obs), model)
-        acts.append(action)
+        obs[t] = ob
+        action = self.act(ob, model)
         ob, rew, done, _ = env.step(action)
-        obs.append(ob)
-        rews.append(rew)
+        ob = np.reshape(ob, (1, *ob_shape))
+        acts[t] = action
+        rews[t] = rew if not done else 0
         t += 1
-        lr = lr - lr_decay_step if lr > min_lr else lr
         ep_rews += rew
 
       if done or t == t_max:
-        # TODO: move to model code to avoid duplicate network evaluation
-        obs_windowed = [list(obs)[i:i+w_size] for i in range(t)]
-        obs_arr = np.reshape(obs_windowed, (t*w_size, self.nO))
-        acts_arr = np.reshape(acts, (t, 1))
+        obs_arr = np.reshape(obs[:t], (t, *ob_shape))
+        acts_arr = np.reshape(acts[:t], (t, 1))
 
         if done:
           R = 0
         else:
-          last_ob = obs_arr[-w_size:,:]
-          R = self.sess.run(model.val, {model.ob:last_ob})
+          R = self.sess.run(model.val, {model.ob:ob})
 
         R_arr = np.zeros((t, 1))
-        R_arr[-1, 0] = R
-        for i in reversed(range(t-1)):
+        for i in reversed(range(t)):
           R = rews[i] + self.config['gamma'] * R
           R_arr[i, 0] = R
 
-        _, _ = self.sess.run([model.pol_updates, model.val_updates],
-          {model.ob:obs_arr, model.ac:acts_arr, model.rew:R_arr,
-           model.lr:np.reshape(lr, (1,))})
+        _ = self.sess.run(model.updates, {model.ob:obs_arr, model.ac:acts_arr,
+          model.rew:R_arr, model.lr:lr})
 
-        acts.clear()
-        rews.clear()
+        lr = lr - lr_decay_step if lr > min_lr else lr
+
+        acts[:] = 0
+        rews[:] = 0
+        obs[:] = 0
         t = 0
 
   def learn(self):
@@ -254,9 +236,10 @@ class ACAgent(object):
       t.start()
 
 def main():
-    agent = ACAgent(gamma=0.99, n_iter=100000, num_threads=8, t_max=5,
-        lr=0.001, min_lr=0.0001, lr_decay_no_steps=30000, hidden_1=20,
-        rnn_size=10, num_rnn_cells=1, num_rnn_steps=2, env_name='CartPole-v0')
+    agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=1, t_max=5,
+      lr=0.01, min_lr=0.1, lr_decay_no_steps=30000, hidden_1=50, rnn_size=50,
+      num_rnn_cells=1, num_rnn_steps=1, env_name='CartPole-v0',
+      use_rnn=False, entropy_beta=0., rms_decay=0.9)
     agent.learn()
 
 if __name__ == "__main__":
