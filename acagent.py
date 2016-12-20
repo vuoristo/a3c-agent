@@ -17,8 +17,6 @@ class ThreadModel(object):
   def __init__(self, input_size, output_size, global_network, config):
     W0_size = config['hidden_1']
     rnn_size = config['rnn_size']
-    num_rnn_cells = config['num_rnn_cells']
-    num_rnn_steps = config['num_rnn_steps']
     entropy_beta = config['entropy_beta']
     grad_norm_clip_val = config['grad_norm_clip_val']
     use_rnn = config['use_rnn']
@@ -43,13 +41,18 @@ class ThreadModel(object):
 
       if use_rnn:
         lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
-        cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_rnn_cells)
-        hs_reshaped = tf.reshape(h1, (-1, num_rnn_steps, W0_size))
-        rnn_inputs = [tf.squeeze(hs, [1]) for hs in tf.split(1, num_rnn_steps,
-          hs_reshaped)]
-        rnn_outputs, states = tf.nn.rnn(cell, rnn_inputs, dtype=tf.float32)
+
+        self.rnn_state_initial_c = tf.placeholder(tf.float32, (1, rnn_size))
+        self.rnn_state_initial_h = tf.placeholder(tf.float32, (1, rnn_size))
+        self.rnn_state_initial = tf.nn.rnn_cell.LSTMStateTuple(
+          self.rnn_state_initial_c, self.rnn_state_initial_h)
+
+        time_windows = tf.reshape(h1, (1, -1, W0_size))
+        rnn_outputs, self.rnn_state_after = tf.nn.dynamic_rnn(
+          lstm_cell, time_windows, initial_state=self.rnn_state_initial,
+          dtype=tf.float32)
         nn_output_size = rnn_size
-        nn_outputs = rnn_outputs[-1]
+        nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
       W_softmax = tf.get_variable('W_softmax', shape=(nn_output_size,
         output_size), initializer=init)
@@ -128,8 +131,6 @@ class ACAgent(object):
         hidden_1 = 20,
         rnn_size = 10,
         use_rnn = True,
-        num_rnn_cells = 1,
-        num_rnn_steps = 1,
         num_threads = 1,
         env_name = '',
         entropy_beta = 0.01,
@@ -143,6 +144,7 @@ class ACAgent(object):
       range(self.config['num_threads'])]
     self.nO = self.envs[0].observation_space.shape[0]
     self.nA = self.envs[0].action_space.n
+    self.use_rnn = self.config['use_rnn']
 
     with tf.variable_scope('global'):
       global_model = ThreadModel(self.nO, self.nA, None, self.config)
@@ -156,8 +158,22 @@ class ACAgent(object):
     self.sess = tf.Session()
     self.sess.run(tf.initialize_all_variables())
 
+  def reset_rnn_state(self, rnn_size):
+    self.running_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
+      np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
+    self.training_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
+      np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
+
   def act(self, ob, model):
-    prob = self.sess.run(model.pol_prob, {model.ob:ob})
+    if self.use_rnn:
+      prob, self.running_rnn_state = self.sess.run(
+        [model.pol_prob, model.rnn_state_after],
+        {model.ob:ob,
+         model.rnn_state_initial_c:self.running_rnn_state[0],
+         model.rnn_state_initial_h:self.running_rnn_state[1],
+        })
+    else:
+      prob = self.sess.run(model.pol_prob, {model.ob:ob})
     action = categorical_sample(prob)
     return action
 
@@ -167,7 +183,8 @@ class ACAgent(object):
     min_lr = self.config['min_lr']
     lr_decay_no_steps = self.config['lr_decay_no_steps']
     lr_decay_step = (lr - min_lr)/lr_decay_no_steps
-    w_size = self.config['num_rnn_steps']
+    self.use_rnn = self.config['use_rnn']
+    rnn_size = self.config['rnn_size']
 
     env = self.envs[thread_id]
     model = self.thr_models[thread_id]
@@ -181,10 +198,15 @@ class ACAgent(object):
     ep_count = 0
     rews_acc = deque(maxlen=100)
 
+    if self.use_rnn:
+      self.reset_rnn_state(rnn_size)
+
     t = 0
     done = True
     for iteration in range(self.config['n_iter']):
       if done:
+        if self.use_rnn:
+          self.reset_rnn_state(rnn_size)
         done = False
         ob = env.reset()
         ob = np.reshape(ob, (1, *ob_shape))
@@ -211,15 +233,39 @@ class ACAgent(object):
         if done:
           R = 0
         else:
-          R = self.sess.run(model.val, {model.ob:ob})
+          if self.use_rnn:
+            R = self.sess.run(
+              model.val,
+              {model.ob:ob,
+               model.rnn_state_initial_c:self.running_rnn_state[0],
+               model.rnn_state_initial_h:self.running_rnn_state[1],
+              })
+          else:
+            R = self.sess.run(model.val, {model.ob:ob})
 
         R_arr = np.zeros((t, 1))
         for i in reversed(range(t)):
           R = rews[i] + self.config['gamma'] * R
           R_arr[i, 0] = R
 
-        _ = self.sess.run(model.updates, {model.ob:obs_arr, model.ac:acts_arr,
-          model.rew:R_arr, model.lr:lr})
+        if self.use_rnn:
+          _, self.training_rnn_state = self.sess.run(
+            [model.updates, model.rnn_state_after],
+            {model.ob:obs_arr,
+             model.ac:acts_arr,
+             model.rew:R_arr,
+             model.lr:lr,
+             model.rnn_state_initial_c:self.training_rnn_state[0],
+             model.rnn_state_initial_h:self.training_rnn_state[1],
+            })
+        else:
+          _ = self.sess.run(
+            model.updates,
+            {model.ob:obs_arr,
+             model.ac:acts_arr,
+             model.rew:R_arr,
+             model.lr:lr,
+            })
 
         lr = lr - lr_decay_step if lr > min_lr else lr
 
@@ -237,9 +283,9 @@ class ACAgent(object):
 
 def main():
     agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=1, t_max=5,
-      lr=0.01, min_lr=0.1, lr_decay_no_steps=30000, hidden_1=50, rnn_size=50,
-      num_rnn_cells=1, num_rnn_steps=1, env_name='CartPole-v0',
-      use_rnn=False, entropy_beta=0., rms_decay=0.9)
+      lr=0.01, min_lr=0.1, lr_decay_no_steps=30000, hidden_1=100, rnn_size=100,
+      env_name='CartPole-v0', use_rnn=False, entropy_beta=0.0,
+      rms_decay=0.9)
     agent.learn()
 
 if __name__ == "__main__":
