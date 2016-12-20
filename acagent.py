@@ -3,6 +3,7 @@ import tensorflow as tf
 import numpy as np
 import threading
 from collections import deque
+from PIL import Image, ImageOps
 
 def categorical_sample(prob):
   """
@@ -13,8 +14,19 @@ def categorical_sample(prob):
   csprob = np.cumsum(prob)
   return (csprob > np.random.rand()).argmax()
 
+def weight_variable(name, shape):
+  d = 1.0 / np.sqrt(np.product(shape))
+  return tf.Variable(tf.random_uniform(shape, minval=-d, maxval=d), name=name)
+
+def bias_variable(name, shape):
+  d = 1.0 / np.sqrt(np.product(shape))
+  return tf.Variable(tf.random_uniform(shape, minval=-d, maxval=d), name=name)
+
+def conv2d(x,W,strides):
+  return tf.nn.conv2d(x,W,strides=strides, padding='SAME')
+
 class ThreadModel(object):
-  def __init__(self, input_size, output_size, global_network, config):
+  def __init__(self, input_shape, output_size, global_network, config):
     W0_size = config['hidden_1']
     rnn_size = config['rnn_size']
     entropy_beta = config['entropy_beta']
@@ -22,22 +34,38 @@ class ThreadModel(object):
     use_rnn = config['use_rnn']
     rms_decay = config['rms_decay']
 
-    self.ob = tf.placeholder(tf.float32, (None, input_size), name='ob')
+    self.ob = tf.placeholder(tf.float32, (None, *input_shape), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
     self.lr = tf.placeholder(tf.float32, name='lr')
 
     with tf.variable_scope('policy_value_network') as thread_scope:
-      init = tf.uniform_unit_scaling_initializer()
-      W0 = tf.get_variable('W0', shape=(input_size, W0_size), initializer=init)
-      b0 = tf.get_variable('b0', initializer=tf.constant(0., shape=(W0_size,)))
-      W1 = tf.get_variable('W1', shape=(W0_size, W0_size), initializer=init)
-      b1 = tf.get_variable('b1', initializer=tf.constant(0., shape=(W0_size,)))
-      h0 = tf.nn.relu(tf.nn.bias_add(tf.matmul(self.ob, W0), b0))
-      h1 = tf.nn.relu(tf.nn.bias_add(tf.matmul(h0, W1), b1))
+      x_input = tf.transpose(self.ob, (0,2,3,1))
 
-      nn_output_size = W0_size
-      nn_outputs = h1
+      with tf.name_scope('conv1') as scope:
+        W_conv1 = weight_variable('W', [8, 8, input_shape[0], 16])
+        b_conv1 = bias_variable('b', [16])
+
+        h_conv1 = tf.nn.relu(conv2d(x_input, W_conv1, [1,4,4,1]) +
+            b_conv1, name='h')
+
+      with tf.name_scope('conv2'):
+        W_conv2 = weight_variable('W', [4,4,16,32])
+        b_conv2 = bias_variable('b', [32])
+
+        h_conv2 = tf.nn.relu(conv2d(h_conv1, W_conv2, [1,2,2,1]) +
+            b_conv2, name='h')
+
+      with tf.name_scope('fc1'):
+        conv2_out_size = 3872
+        W_fc1 = weight_variable('W', [conv2_out_size, 256])
+        b_fc1 = bias_variable('b', [256])
+
+        h_conv2_flat = tf.reshape(h_conv2, [-1, conv2_out_size])
+        h_fc1 = tf.nn.relu(tf.matmul(h_conv2_flat, W_fc1) + b_fc1, name='h')
+
+        nn_outputs = h_fc1
+        nn_output_size = 256
 
       if use_rnn:
         lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
@@ -47,22 +75,23 @@ class ThreadModel(object):
         self.rnn_state_initial = tf.nn.rnn_cell.LSTMStateTuple(
           self.rnn_state_initial_c, self.rnn_state_initial_h)
 
-        time_windows = tf.reshape(h1, (1, -1, W0_size))
+        time_windows = tf.reshape(nn_outputs, (1, -1, nn_output_size))
         rnn_outputs, self.rnn_state_after = tf.nn.dynamic_rnn(
           lstm_cell, time_windows, initial_state=self.rnn_state_initial,
           dtype=tf.float32)
         nn_output_size = rnn_size
         nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
-      W_softmax = tf.get_variable('W_softmax', shape=(nn_output_size,
-        output_size), initializer=init)
-      b_softmax = tf.get_variable('b_softmax',
-        initializer=tf.constant(0., shape=(output_size,)))
+      d = 1.0 / np.sqrt(nn_output_size)
+      W_softmax = tf.Variable(tf.random_uniform([nn_output_size, output_size],
+        minval=-d, maxval=d), name='W_softmax')
+      b_softmax = tf.Variable(tf.random_uniform([output_size], minval=-d,
+        maxval=d), name='b_softmax')
 
-      W_linear = tf.get_variable('W_linear', shape=(nn_output_size, 1),
-        initializer=init)
-      b_linear = tf.get_variable('b_linear',
-        initializer=tf.constant(0., shape=(1,)))
+      W_linear = tf.Variable(tf.random_uniform([nn_output_size, 1], minval=-d,
+        maxval=d), name='W_linear')
+      b_linear = tf.Variable(tf.random_uniform([1], minval=-d, maxval=d),
+        name='b_linear')
 
     # Variable collections for update computations
     self.trainable_variables = tf.get_collection(
@@ -89,7 +118,7 @@ class ThreadModel(object):
         td_error = self.rew - self.val
         policy_loss = -log_masked_prob * td_error
         value_loss = tf.nn.l2_loss(td_error)
-        entropy = -tf.reduce_sum(masked_prob * log_masked_prob) * entropy_beta
+        entropy = tf.reduce_sum(masked_prob * log_masked_prob) * entropy_beta
         total_loss = tf.reduce_mean(policy_loss + 0.5 * value_loss) + entropy
 
       with tf.name_scope('gradients'):
@@ -141,17 +170,18 @@ class ACAgent(object):
 
     self.envs = [gym.make(self.config['env_name']) for _ in
       range(self.config['num_threads'])]
-    self.nO = self.envs[0].observation_space.shape[0]
-    self.nA = self.envs[0].action_space.n
+    input_shape = (3,84,84)
+    action_num = self.envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
     with tf.variable_scope('global'):
-      global_model = ThreadModel(self.nO, self.nA, None, self.config)
+      global_model = ThreadModel(input_shape, action_num, None, self.config)
 
     self.thr_models = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
-        thr_model = ThreadModel(self.nO, self.nA, global_model, self.config)
+        thr_model = ThreadModel(input_shape, action_num, global_model,
+          self.config)
         self.thr_models.append(thr_model)
 
     self.sess = tf.Session()
@@ -176,6 +206,11 @@ class ACAgent(object):
     action = categorical_sample(prob)
     return action
 
+  def resize_observation(self, observation, shape, centering):
+    img = Image.fromarray(observation)
+    img = ImageOps.fit(img, shape[1:], centering=centering)
+    return np.reshape(img, (1, *shape))
+
   def learning_thread(self, thread_id):
     t_max = self.config['t_max']
     lr = self.config['lr']
@@ -188,7 +223,8 @@ class ACAgent(object):
     env = self.envs[thread_id]
     model = self.thr_models[thread_id]
 
-    ob_shape = env.observation_space.shape
+    ob_shape = (3,84,84)
+    crop_centering = (0.5, 0.7)
     obs = np.zeros((t_max, *ob_shape))
     acts = np.zeros((t_max))
     rews = np.zeros((t_max))
@@ -208,6 +244,7 @@ class ACAgent(object):
           self.reset_rnn_state(rnn_size)
         done = False
         ob = env.reset()
+        ob = self.resize_observation(ob, ob_shape, crop_centering)
         ob = np.reshape(ob, (1, *ob_shape))
         rews_acc.append(ep_rews)
         ep_count += 1
@@ -219,7 +256,7 @@ class ACAgent(object):
         obs[t] = ob
         action = self.act(ob, model)
         ob, rew, done, _ = env.step(action)
-        ob = np.reshape(ob, (1, *ob_shape))
+        ob = self.resize_observation(ob, ob_shape, crop_centering)
         acts[t] = action
         rews[t] = rew if not done else 0
         t += 1
@@ -281,9 +318,9 @@ class ACAgent(object):
       t.start()
 
 def main():
-    agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=1, t_max=5,
-      lr=0.01, min_lr=0.1, lr_decay_no_steps=30000, hidden_1=100, rnn_size=100,
-      env_name='CartPole-v0', use_rnn=False, entropy_beta=0.0,
+    agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=8, t_max=5,
+      lr=0.01, min_lr=0.0001, lr_decay_no_steps=30000, hidden_1=100,
+      rnn_size=100, env_name='Breakout-v0', use_rnn=False, entropy_beta=0.01,
       rms_decay=0.9)
     agent.learn()
 
