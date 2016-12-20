@@ -89,7 +89,8 @@ class ThreadModel(object):
         td_error = self.rew - self.val
         policy_loss = -log_masked_prob * td_error
         value_loss = tf.nn.l2_loss(td_error)
-        total_loss = tf.reduce_mean(policy_loss + 0.5 * value_loss)
+        entropy = -tf.reduce_sum(masked_prob * log_masked_prob) * entropy_beta
+        total_loss = tf.reduce_mean(policy_loss + 0.5 * value_loss) + entropy
 
       with tf.name_scope('gradients'):
         self.grads = tf.gradients(total_loss, self.trainable_variables)
