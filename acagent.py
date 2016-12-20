@@ -130,9 +130,10 @@ class ThreadModel(object):
           global_network.gradient_mean_square, decay=rms_decay)
 
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq,
-                  decay=0.9, epsilon=1e-10, grad_norm_clip=10.):
+                  decay=0.9, epsilon=1e-10, grad_norm_clip=50.):
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
+      grad = tf.clip_by_norm(grad, grad_norm_clip)
       msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
       with tf.control_dependencies([msq_update]):
         gradient_update = -self.lr * grad / tf.sqrt(msq + epsilon)
