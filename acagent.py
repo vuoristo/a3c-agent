@@ -96,21 +96,19 @@ class ThreadModel(object):
         self.grads = tf.gradients(total_loss, self.trainable_variables)
 
       with tf.name_scope('updates'):
-        self.updates = self.get_updates(global_network.trainable_variables,
+        self.updates = self.get_rms_updates(global_network.trainable_variables,
           self.trainable_variables, self.grads,
           global_network.gradient_mean_square, decay=rms_decay)
 
-  def get_updates(self, global_vars, local_vars, grads, grad_msq,
+  def get_rms_updates(self, global_vars, local_vars, grads, grad_msq,
                   decay=0.9, epsilon=1e-10, grad_norm_clip=10.):
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
-      # compute rmsprop update per variable
       msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
       with tf.control_dependencies([msq_update]):
         gradient_update = -self.lr * grad / tf.sqrt(msq + epsilon)
         l_to_g = Wg.assign_add(gradient_update)
 
-      # apply updates to global variables
       updates += [gradient_update, l_to_g, msq_update]
 
     with tf.control_dependencies(updates):
@@ -290,4 +288,4 @@ def main():
     agent.learn()
 
 if __name__ == "__main__":
-    main()
+  main()
