@@ -164,21 +164,35 @@ class ThreadModel(object):
         self.summary_op = tf.merge_all_summaries()
 
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq,
-                  decay=0.99, epsilon=1e-10, grad_norm_clip=50.):
+                      decay=0.99, epsilon=1e-10, grad_norm_clip=50.):
+    """
+    Compute shared RMSProp updates for local_vars.
+    global_vars - stores the global variables shared by all threads
+    local_vars - thread local variables that are used for gradient computation
+    grads - gradients of local_vars
+    grad_msq - globally stored mean of squared gradients
+    decay - the momentum parameter
+    epsilon - for numerical stability
+    grad_norm_clip - gradient norm clipping amount
+    """
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
       grad = tf.clip_by_norm(grad, grad_norm_clip)
       msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
+
+      # control dependecies make sure msq is updated before gradients
       with tf.control_dependencies([msq_update]):
         gradient_update = -self.lr * grad / tf.sqrt(msq + epsilon)
-        l_to_g = Wg.assign_add(gradient_update)
+        local_to_global = Wg.assign_add(gradient_update)
 
-      updates += [gradient_update, l_to_g, msq_update]
+      updates += [gradient_update, local_to_global, msq_update]
 
+    # control dependecies make sure local to global updates are completed
+    # before global to local updates.
     with tf.control_dependencies(updates):
       for Wg, Wl in zip(global_vars, local_vars):
-        g_to_l = Wl.assign(Wg)
-        updates += [g_to_l]
+        global_to_local = Wl.assign(Wg)
+        updates += [global_to_local]
 
     return updates
 
