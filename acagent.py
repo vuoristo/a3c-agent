@@ -92,7 +92,8 @@ class ThreadModel(object):
         nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
       stddev = 1./nn_output_size
-      W_softmax = weight_variable('W_softmax', [nn_output_size, output_size], stddev)
+      W_softmax = weight_variable('W_softmax',
+        [nn_output_size, output_size], stddev)
       b_softmax = bias_variable('b_softmax', [output_size], 0.0)
 
       W_linear = weight_variable('W_linear', [nn_output_size, 1], stddev)
@@ -122,10 +123,10 @@ class ThreadModel(object):
           reduction_indices=1, keep_dims=True)
         log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-22, 1.0))
         td_error = self.rew - self.val
-        entropy = -tf.reduce_sum(masked_prob * log_masked_prob, reduction_indices=1, keep_dims=True) * entropy_beta
+        entropy = -tf.reduce_sum(masked_prob * log_masked_prob,
+          reduction_indices=1, keep_dims=True) * entropy_beta
         policy_loss = -(log_masked_prob * td_error + entropy)
         value_loss = td_error ** 2. / 2.
-        #total_loss = tf.reduce_sum(policy_loss + 0.5 * value_loss)
         total_loss = policy_loss + 0.5 * value_loss
 
       with tf.name_scope('gradients'):
