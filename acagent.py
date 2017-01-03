@@ -56,10 +56,6 @@ class ThreadModel(object):
         h_conv1 = tf.nn.relu(conv2d(self.ob, W_conv1, [1,4,4,1]) +
             b_conv1, name='h')
 
-      if 'thread_0' in thread_scope.name:
-        kernel_summary = _kernel_img_summary(W_conv1, [8,8,1,16], 'conv1 kernels')
-        activation_summary = _activation_summary(h_conv1, (20,20,16), 'conv1 activation')
-
       with tf.variable_scope('conv2'):
         stddev = 2./(4*4*16)
         W_conv2 = weight_variable('W', [4,4,16,32], stddev)
@@ -132,30 +128,39 @@ class ThreadModel(object):
         #total_loss = tf.reduce_sum(policy_loss + 0.5 * value_loss)
         total_loss = policy_loss + 0.5 * value_loss
 
-        value_loss_summary = tf.scalar_summary('value_loss', tf.reduce_mean(value_loss))
-        policy_loss_summary = tf.scalar_summary('policy_loss', tf.reduce_mean(policy_loss))
-        total_loss_summary = tf.scalar_summary('total_loss', tf.reduce_mean(total_loss))
-        entropy_summary = tf.scalar_summary('entropy', tf.reduce_mean(entropy))
-        max_prob_summary = tf.scalar_summary('max_prob', tf.reduce_max(self.pol_prob))
-        td_error_summary = tf.scalar_summary('td_error', tf.reduce_mean(td_error))
-
       with tf.name_scope('gradients'):
         self.grads = tf.gradients(total_loss, self.trainable_variables)
-
-        for grad in self.grads:
-          tf.scalar_summary('grad_' + grad.name, tf.reduce_mean(grad))
-
-      for var in self.trainable_variables:
-        tf.scalar_summary('var_' + '/'.join(var.name.split('/')[-3:]), tf.reduce_mean(var))
 
       with tf.name_scope('updates'):
         self.updates = self.get_rms_updates(global_network.trainable_variables,
           self.trainable_variables, self.grads,
           global_network.gradient_mean_square, decay=rms_decay)
 
-      self.dbg = [self.pol_prob, masked_prob, td_error, entropy, policy_loss, value_loss, total_loss]
-      #self.dbg = h_fc1
-      self.summary_op = tf.merge_all_summaries()
+      # Get summaries for thread 0
+      if 'thread_0' in thread_scope.name:
+        _kernel_img_summary(W_conv1, [8,8,1,16], 'conv1 kernels')
+        _activation_summary(h_conv1, (20,20,16), 'conv1 activation')
+
+        tf.scalar_summary('value_loss', tf.reduce_mean(value_loss))
+        tf.scalar_summary('policy_loss', tf.reduce_mean(policy_loss))
+        tf.scalar_summary('total_loss', tf.reduce_mean(total_loss))
+        tf.scalar_summary('entropy', tf.reduce_mean(entropy))
+        tf.scalar_summary('max_prob', tf.reduce_max(self.pol_prob))
+        tf.scalar_summary('td_error', tf.reduce_mean(td_error))
+
+        for grad in self.grads:
+          summary_name = 'grad_' + '/'.join(grad.name.split('/')[-3:])
+          tf.scalar_summary(summary_name, tf.reduce_mean(grad))
+
+        for msq in global_network.gradient_mean_square:
+          summary_name = 'msq_' + '/'.join(msq.name.split('/')[-3:])
+          tf.scalar_summary(summary_name, tf.reduce_mean(msq))
+
+        for var in self.trainable_variables:
+          summary_name = 'var_' + '/'.join(var.name.split('/')[-3:])
+          tf.scalar_summary(summary_name, tf.reduce_mean(var))
+
+        self.summary_op = tf.merge_all_summaries()
 
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq,
                   decay=0.99, epsilon=1e-10, grad_norm_clip=50.):
@@ -163,7 +168,6 @@ class ThreadModel(object):
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
       grad = tf.clip_by_norm(grad, grad_norm_clip)
       msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
-      tf.scalar_summary('msq_' + msq.name, tf.reduce_mean(msq))
       with tf.control_dependencies([msq_update]):
         gradient_update = -self.lr * grad / tf.sqrt(msq + epsilon)
         l_to_g = Wg.assign_add(gradient_update)
@@ -334,8 +338,8 @@ class ACAgent(object):
              model.rnn_state_initial_h:self.training_rnn_state[1],
             })
         else:
-          _, dbg = sess.run(
-            [model.updates, model.dbg],
+          _ = sess.run(
+            [model.updates],
             {model.ob:obs_arr,
              model.ac:acts_arr,
              model.rew:R_arr,
