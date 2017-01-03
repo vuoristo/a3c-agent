@@ -5,6 +5,8 @@ import threading
 from collections import deque
 from PIL import Image, ImageOps
 
+from util import _kernel_img_summary, _activation_summary
+
 def categorical_sample(prob):
   """
   Sample from categorical distribution,
@@ -31,19 +33,6 @@ def resize_observation(observation, shape, centering):
   img = img.convert('L')
   return np.reshape(np.array(img), (1, *shape)) * 1./255.
 
-def _kernel_img_summary(img, shape, channel):
-  xx = shape[0] + 2
-  yy = shape[1] + 2
-
-  tmp1 = tf.slice(img,(0,0,channel,0),(-1,-1,1,-1))
-  tmp1 = tf.reshape(tmp1,(shape[0],shape[1],shape[3]))
-  tmp1 = tf.image.resize_image_with_crop_or_pad(tmp1,xx,yy)
-  tmp1 = tf.reshape(tmp1,(xx,yy,4,4))
-  tmp1 = tf.transpose(tmp1,(2,0,3,1))
-  tmp1 = tf.reshape(tmp1,(1,4*xx,4*yy,1))
-
-  return tmp1
-
 class ThreadModel(object):
   def __init__(self, input_shape, output_size, global_network, config):
     W0_size = config['hidden_1']
@@ -67,16 +56,8 @@ class ThreadModel(object):
             b_conv1, name='h')
 
       if 'thread_0' in thread_scope.name:
-        kernel_summary = _kernel_img_summary(W_conv1, [8,8,1,16], 0)
-        tf.image_summary('conv1 kernels', kernel_summary)
-
-        activation_image = tf.slice(h_conv1, (0,0,0,0), (1,-1,-1,-1))
-        activation_image = tf.reshape(activation_image, (20,20,16))
-        activation_image = tf.image.resize_image_with_crop_or_pad(activation_image, 21, 21)
-        activation_image = tf.reshape(activation_image,(21,21,4,4))
-        activation_image = tf.transpose(activation_image, (2,0,3,1))
-        activation_image = tf.reshape(activation_image, (1,4*21,4*21,1))
-        tf.image_summary('activation image', activation_image)
+        kernel_summary = _kernel_img_summary(W_conv1, [8,8,1,16], 'conv1 kernels')
+        activation_summary = _activation_summary(h_conv1, (20,20,16), 'conv1 activation')
 
       with tf.variable_scope('conv2'):
         W_conv2 = weight_variable('W', [4,4,16,32], 2./256)
