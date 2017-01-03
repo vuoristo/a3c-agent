@@ -7,15 +7,6 @@ from PIL import Image, ImageOps
 
 from util import _kernel_img_summary, _activation_summary
 
-def categorical_sample(prob):
-  """
-  Sample from categorical distribution,
-  specified by a vector of class probabilities
-  """
-  prob = np.asarray(prob)
-  csprob = np.cumsum(prob)
-  return (csprob > np.random.rand()).argmax()
-
 def weight_variable(name, shape, stddev):
   return tf.get_variable(name,
       shape=shape, initializer=tf.truncated_normal_initializer(stddev=stddev))
@@ -26,12 +17,6 @@ def bias_variable(name, shape, value):
 
 def conv2d(x, W, strides):
   return tf.nn.conv2d(x, W, strides=strides, padding='VALID')
-
-def resize_observation(observation, shape, centering):
-  img = Image.fromarray(observation)
-  img = ImageOps.fit(img, shape[:2], centering=centering)
-  img = img.convert('L')
-  return np.reshape(np.array(img), (1, *shape)) * 1./255.
 
 class ThreadModel(object):
   def __init__(self, input_shape, output_size, global_network, config):
@@ -196,20 +181,82 @@ class ThreadModel(object):
 
     return updates
 
-def act(ob, model, sess, use_rnn):
+def resize_observation(observation, shape, centering):
+  img = Image.fromarray(observation)
+  img = ImageOps.fit(img, shape[:2], centering=centering)
+  img = img.convert('L')
+  return np.reshape(np.array(img), (1, *shape)) * 1./255.
+
+def categorical_sample(prob):
+  prob = np.asarray(prob)
+  csprob = np.cumsum(prob)
+  return (csprob > np.random.rand()).argmax()
+
+def act(ob, model, session, use_rnn):
   if use_rnn:
-    prob, running_rnn_state = sess.run(
+    prob, running_rnn_state = session.run(
       [model.pol_prob, model.rnn_state_after],
       {model.ob:ob,
        model.rnn_state_initial_c:running_rnn_state[0],
        model.rnn_state_initial_h:running_rnn_state[1],
       })
   else:
-    prob = sess.run(model.pol_prob, {model.ob:ob})
+    prob = session.run(model.pol_prob, {model.ob:ob})
   action = categorical_sample(prob)
   return action
 
-def learning_thread(thread_id, config, sess, model, global_model, env):
+def bootstrap_return(session, model, observation, running_rnn_state):
+  if running_rnn_state is not None:
+    R = session.run(
+      model.val,
+      {model.ob:observation,
+       model.rnn_state_initial_c:running_rnn_state[0],
+       model.rnn_state_initial_h:running_rnn_state[1],
+      })
+  else:
+    R = session.run(model.val, {model.ob:observation})
+
+  return R
+
+def run_updates(session, model, obs_arr, acts_arr, R_arr, lr, training_rnn_state):
+  if training_rnn_state is not None:
+    _, training_rnn_state = session.run(
+      [model.updates, model.rnn_state_after],
+      {model.ob:obs_arr,
+       model.ac:acts_arr,
+       model.rew:R_arr,
+       model.lr:lr,
+       model.rnn_state_initial_c:training_rnn_state[0],
+       model.rnn_state_initial_h:training_rnn_state[1],
+      })
+  else:
+    _ = session.run(
+      [model.updates],
+      {model.ob:obs_arr,
+       model.ac:acts_arr,
+       model.rew:R_arr,
+       model.lr:lr,
+      })
+
+  return training_rnn_state
+
+def reset_rnn_state(rnn_size):
+  running_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
+    np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
+  training_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
+    np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
+
+  return running_rnn_state, training_rnn_state
+
+def discounted_returns(rews, gamma, R, t):
+  R_arr = np.zeros((t, 1))
+  for i in reversed(range(t)):
+    R = rews[i] + gamma * R
+    R_arr[i, 0] = R
+
+  return R_arr
+
+def learning_thread(thread_id, config, session, model, global_model, env):
   t_max = config['t_max']
   lr = config['lr']
   min_lr = config['min_lr']
@@ -224,27 +271,29 @@ def learning_thread(thread_id, config, sess, model, global_model, env):
   acts = np.zeros((t_max))
   rews = np.zeros((t_max))
 
+  # variables for accounting
   ep_rews = 0
   ep_count = 0
   rews_acc = deque(maxlen=100)
 
+  running_rnn_state = None
+  training_rnn_state = None
+
   if thread_id == 0:
-    summary_writer = tf.train.SummaryWriter('train', sess.graph)
+    summary_writer = tf.train.SummaryWriter('train', session.graph)
 
-  if use_rnn:
-    reset_rnn_state(rnn_size)
-
+  # Training loop
   t = 0
   done = True
   for iteration in range(config['n_iter']):
     if done:
-      if thread_id == 0 and ep_count % 100 == 0:
-        global_model.saver.save(sess, 'train/model.ckpt', global_step=iteration)
-      if use_rnn:
-        reset_rnn_state(rnn_size)
       done = False
       ob = env.reset()
       ob = resize_observation(ob, ob_shape, crop_centering)
+
+      if use_rnn:
+        running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
+
       rews_acc.append(ep_rews)
       ep_count += 1
       print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
@@ -253,7 +302,7 @@ def learning_thread(thread_id, config, sess, model, global_model, env):
       ep_rews = 0
     else:
       obs[t] = ob
-      action = act(ob, model, sess, use_rnn)
+      action = act(ob, model, session, use_rnn)
       ob, rew, done, _ = env.step(action)
       ob = resize_observation(ob, ob_shape, crop_centering)
       acts[t] = action
@@ -268,46 +317,12 @@ def learning_thread(thread_id, config, sess, model, global_model, env):
       if done:
         R = 0
       else:
-        if use_rnn:
-          R = sess.run(
-            model.val,
-            {model.ob:ob,
-             model.rnn_state_initial_c:running_rnn_state[0],
-             model.rnn_state_initial_h:running_rnn_state[1],
-            })
-        else:
-          R = sess.run(model.val, {model.ob:ob})
+        R = bootstrap_return(session, model, ob, running_rnn_state)
 
-      R_arr = np.zeros((t, 1))
-      for i in reversed(range(t)):
-        R = rews[i] + config['gamma'] * R
-        R_arr[i, 0] = R
+      R_arr = discounted_returns(rews, config['gamma'], R, t)
 
-      if use_rnn:
-        _, training_rnn_state = sess.run(
-          [model.updates, model.rnn_state_after],
-          {model.ob:obs_arr,
-           model.ac:acts_arr,
-           model.rew:R_arr,
-           model.lr:lr,
-           model.rnn_state_initial_c:training_rnn_state[0],
-           model.rnn_state_initial_h:training_rnn_state[1],
-          })
-      else:
-        _ = sess.run(
-          [model.updates],
-          {model.ob:obs_arr,
-           model.ac:acts_arr,
-           model.rew:R_arr,
-           model.lr:lr,
-          })
-
-      if thread_id == 0 and ep_count % 10 == 0 and done == True:
-        summary_str = sess.run(model.summary_op,
-          {model.ob:obs_arr,
-           model.ac:acts_arr,
-           model.rew:R_arr})
-        summary_writer.add_summary(summary_str, iteration)
+      training_rnn_state = run_updates(session, model, obs_arr, acts_arr,
+        R_arr, lr, training_rnn_state)
 
       lr = lr - lr_decay_step if lr > min_lr else lr
 
@@ -315,6 +330,17 @@ def learning_thread(thread_id, config, sess, model, global_model, env):
       rews[:] = 0
       obs[:] = 0
       t = 0
+
+      if thread_id == 0 and ep_count % 10 == 0 and done == True:
+        summary_str = session.run(model.summary_op,
+          {model.ob:obs_arr,
+           model.ac:acts_arr,
+           model.rew:R_arr})
+        summary_writer.add_summary(summary_str, iteration)
+
+      if thread_id == 0 and ep_count % 100 == 0:
+        global_model.saver.save(session, 'train/model.ckpt',
+          global_step=iteration)
 
 class ACAgent(object):
   def __init__(self, **usercfg):
@@ -355,23 +381,16 @@ class ACAgent(object):
           self.global_model, self.config)
         self.thread_models.append(thr_model)
 
-    self.sess = tf.Session()
-    self.sess.run(tf.initialize_all_variables())
+    self.session = tf.Session()
+    self.session.run(tf.initialize_all_variables())
 
   def learn(self):
     threads = []
     for i in range(self.config['num_threads']):
       thread = threading.Thread(target=learning_thread, args=(
-        i, self.config, self.sess, self.thread_models[i], self.global_model,
+        i, self.config, self.session, self.thread_models[i], self.global_model,
         self.envs[i]))
       thread.start()
-
-  def reset_rnn_state(self, rnn_size):
-    # TODO: This is wrong. rnn_states should be per thread, not shared.
-    self.running_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
-      np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
-    self.training_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
-      np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
 
 def main():
   agent = ACAgent(gamma=0.99, n_iter=1000000, num_threads=8, t_max=5,
