@@ -5,17 +5,6 @@ import threading
 from collections import deque
 from PIL import Image, ImageOps
 
-import os
-import signal
-import sys
-import time
-
-np.set_printoptions(threshold=10000)
-
-def handle_pdb(sig, frame):
-  import pdb
-  pdb.Pdb().set_trace(frame)
-
 def categorical_sample(prob):
   """
   Sample from categorical distribution,
@@ -408,7 +397,6 @@ class ACAgent(object):
       t.start()
 
 def main():
-  signal.signal(signal.SIGUSR1, handle_pdb)
   agent = ACAgent(gamma=0.99, n_iter=1000000, num_threads=8, t_max=5,
     lr=0.001, min_lr=0.00001, lr_decay_no_steps=1000000, hidden_1=100,
     rnn_size=100, env_name='Breakout-v0', use_rnn=False, entropy_beta=0.01,
