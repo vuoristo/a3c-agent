@@ -196,10 +196,125 @@ class ThreadModel(object):
 
     return updates
 
-global_model = None
-thr_models = []
-envs = None
-sess = None
+def act(ob, model, sess, use_rnn):
+  if use_rnn:
+    prob, running_rnn_state = sess.run(
+      [model.pol_prob, model.rnn_state_after],
+      {model.ob:ob,
+       model.rnn_state_initial_c:running_rnn_state[0],
+       model.rnn_state_initial_h:running_rnn_state[1],
+      })
+  else:
+    prob = sess.run(model.pol_prob, {model.ob:ob})
+  action = categorical_sample(prob)
+  return action
+
+def learning_thread(thread_id, config, sess, model, global_model, env):
+  t_max = config['t_max']
+  lr = config['lr']
+  min_lr = config['min_lr']
+  lr_decay_no_steps = config['lr_decay_no_steps']
+  lr_decay_step = (lr - min_lr)/lr_decay_no_steps
+  use_rnn = config['use_rnn']
+  rnn_size = config['rnn_size']
+
+  ob_shape = (84,84,1)
+  crop_centering = (0.5, 0.7)
+  obs = np.zeros((t_max, *ob_shape))
+  acts = np.zeros((t_max))
+  rews = np.zeros((t_max))
+
+  ep_rews = 0
+  ep_count = 0
+  rews_acc = deque(maxlen=100)
+
+  if thread_id == 0:
+    summary_writer = tf.train.SummaryWriter('train', sess.graph)
+
+  if use_rnn:
+    reset_rnn_state(rnn_size)
+
+  t = 0
+  done = True
+  for iteration in range(config['n_iter']):
+    if done:
+      if thread_id == 0 and ep_count % 100 == 0:
+        global_model.saver.save(sess, 'train/model.ckpt', global_step=iteration)
+      if use_rnn:
+        reset_rnn_state(rnn_size)
+      done = False
+      ob = env.reset()
+      ob = resize_observation(ob, ob_shape, crop_centering)
+      rews_acc.append(ep_rews)
+      ep_count += 1
+      print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
+            '{:.1f} lr: {}'.format(thread_id, ep_count, ep_rews,
+            np.mean(rews_acc), lr))
+      ep_rews = 0
+    else:
+      obs[t] = ob
+      action = act(ob, model, sess, use_rnn)
+      ob, rew, done, _ = env.step(action)
+      ob = resize_observation(ob, ob_shape, crop_centering)
+      acts[t] = action
+      rews[t] = rew if not done else 0
+      t += 1
+      ep_rews += rew
+
+    if done or t == t_max:
+      obs_arr = np.reshape(obs[:t], (t, *ob_shape))
+      acts_arr = np.reshape(acts[:t], (t, 1))
+
+      if done:
+        R = 0
+      else:
+        if use_rnn:
+          R = sess.run(
+            model.val,
+            {model.ob:ob,
+             model.rnn_state_initial_c:running_rnn_state[0],
+             model.rnn_state_initial_h:running_rnn_state[1],
+            })
+        else:
+          R = sess.run(model.val, {model.ob:ob})
+
+      R_arr = np.zeros((t, 1))
+      for i in reversed(range(t)):
+        R = rews[i] + config['gamma'] * R
+        R_arr[i, 0] = R
+
+      if use_rnn:
+        _, training_rnn_state = sess.run(
+          [model.updates, model.rnn_state_after],
+          {model.ob:obs_arr,
+           model.ac:acts_arr,
+           model.rew:R_arr,
+           model.lr:lr,
+           model.rnn_state_initial_c:training_rnn_state[0],
+           model.rnn_state_initial_h:training_rnn_state[1],
+          })
+      else:
+        _ = sess.run(
+          [model.updates],
+          {model.ob:obs_arr,
+           model.ac:acts_arr,
+           model.rew:R_arr,
+           model.lr:lr,
+          })
+
+      if thread_id == 0 and ep_count % 10 == 0 and done == True:
+        summary_str = sess.run(model.summary_op,
+          {model.ob:obs_arr,
+           model.ac:acts_arr,
+           model.rew:R_arr})
+        summary_writer.add_summary(summary_str, iteration)
+
+      lr = lr - lr_decay_step if lr > min_lr else lr
+
+      acts[:] = 0
+      rews[:] = 0
+      obs[:] = 0
+      t = 0
 
 class ACAgent(object):
   def __init__(self, **usercfg):
@@ -222,25 +337,34 @@ class ACAgent(object):
 
     self.config.update(usercfg)
 
-    global envs, thr_models, global_model
-    envs = [gym.make(self.config['env_name']) for _ in
+    self.envs = [gym.make(self.config['env_name']) for _ in
       range(self.config['num_threads'])]
-    input_shape = (84,84,1)
-    action_num = envs[0].action_space.n
+
+    self.input_shape = (84,84,1)
+    self.action_num = self.envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
     with tf.variable_scope('global'):
-      global_model = ThreadModel(input_shape, action_num, None, self.config)
+      self.global_model = ThreadModel(self.input_shape, self.action_num, None,
+        self.config)
 
+    self.thread_models = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
-        thr_model = ThreadModel(input_shape, action_num, global_model,
-          self.config)
-        thr_models.append(thr_model)
+        thr_model = ThreadModel(self.input_shape, self.action_num,
+          self.global_model, self.config)
+        self.thread_models.append(thr_model)
 
-    global sess
-    sess = tf.Session()
-    sess.run(tf.initialize_all_variables())
+    self.sess = tf.Session()
+    self.sess.run(tf.initialize_all_variables())
+
+  def learn(self):
+    threads = []
+    for i in range(self.config['num_threads']):
+      thread = threading.Thread(target=learning_thread, args=(
+        i, self.config, self.sess, self.thread_models[i], self.global_model,
+        self.envs[i]))
+      thread.start()
 
   def reset_rnn_state(self, rnn_size):
     # TODO: This is wrong. rnn_states should be per thread, not shared.
@@ -248,149 +372,6 @@ class ACAgent(object):
       np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
     self.training_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
       np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
-
-  def act(self, ob, model):
-    global sess
-    if self.use_rnn:
-      prob, self.running_rnn_state = sess.run(
-        [model.pol_prob, model.rnn_state_after],
-        {model.ob:ob,
-         model.rnn_state_initial_c:self.running_rnn_state[0],
-         model.rnn_state_initial_h:self.running_rnn_state[1],
-        })
-    else:
-      prob = sess.run(model.pol_prob, {model.ob:ob})
-    action = categorical_sample(prob)
-    return action
-
-
-  def learning_thread(self, thread_id):
-    global envs, thr_models, sess
-    t_max = self.config['t_max']
-    lr = self.config['lr']
-    min_lr = self.config['min_lr']
-    lr_decay_no_steps = self.config['lr_decay_no_steps']
-    lr_decay_step = (lr - min_lr)/lr_decay_no_steps
-    self.use_rnn = self.config['use_rnn']
-    rnn_size = self.config['rnn_size']
-
-    env = envs[thread_id]
-    model = thr_models[thread_id]
-
-    ob_shape = (84,84,1)
-    crop_centering = (0.5, 0.7)
-    obs = np.zeros((t_max, *ob_shape))
-    acts = np.zeros((t_max))
-    rews = np.zeros((t_max))
-
-    ep_rews = 0
-    ep_count = 0
-    rews_acc = deque(maxlen=100)
-
-    if thread_id == 0:
-      self.summary_writer = tf.train.SummaryWriter('train', sess.graph)
-
-    if self.use_rnn:
-      self.reset_rnn_state(rnn_size)
-
-    t = 0
-    done = True
-    for iteration in range(self.config['n_iter']):
-      if done:
-        if thread_id == 0 and ep_count % 100 == 0:
-          global_model.saver.save(sess, 'train/model.ckpt', global_step=iteration)
-        if self.use_rnn:
-          self.reset_rnn_state(rnn_size)
-        done = False
-        ob = env.reset()
-        ob = resize_observation(ob, ob_shape, crop_centering)
-        rews_acc.append(ep_rews)
-        ep_count += 1
-        print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
-              '{:.1f} lr: {}'.format(thread_id, ep_count, ep_rews,
-              np.mean(rews_acc), lr))
-        ep_rews = 0
-      else:
-        obs[t] = ob
-        action = self.act(ob, model)
-        ob, rew, done, _ = env.step(action)
-        ob = resize_observation(ob, ob_shape, crop_centering)
-        acts[t] = action
-        rews[t] = rew if not done else 0
-        t += 1
-        ep_rews += rew
-
-      if done or t == t_max:
-        obs_arr = np.reshape(obs[:t], (t, *ob_shape))
-        acts_arr = np.reshape(acts[:t], (t, 1))
-
-        if done:
-          R = 0
-        else:
-          if self.use_rnn:
-            R = sess.run(
-              model.val,
-              {model.ob:ob,
-               model.rnn_state_initial_c:self.running_rnn_state[0],
-               model.rnn_state_initial_h:self.running_rnn_state[1],
-              })
-          else:
-            R = sess.run(model.val, {model.ob:ob})
-
-        R_arr = np.zeros((t, 1))
-        for i in reversed(range(t)):
-          R = rews[i] + self.config['gamma'] * R
-          R_arr[i, 0] = R
-
-        if self.use_rnn:
-          _, self.training_rnn_state = sess.run(
-            [model.updates, model.rnn_state_after],
-            {model.ob:obs_arr,
-             model.ac:acts_arr,
-             model.rew:R_arr,
-             model.lr:lr,
-             model.rnn_state_initial_c:self.training_rnn_state[0],
-             model.rnn_state_initial_h:self.training_rnn_state[1],
-            })
-        else:
-          _ = sess.run(
-            [model.updates],
-            {model.ob:obs_arr,
-             model.ac:acts_arr,
-             model.rew:R_arr,
-             model.lr:lr,
-            })
-
-        if thread_id == 0 and ep_count % 10 == 0 and done == True:
-          summary_str = sess.run(model.summary_op,
-            {model.ob:obs_arr,
-             model.ac:acts_arr,
-             model.rew:R_arr})
-          self.summary_writer.add_summary(summary_str, iteration)
-          #print(dbg)
-
-  #      if thread_id == 0:
-  #        for var, name in zip(dbg, ['pol_prob', 'masked_prob', 'td_error', 'entropy', 'policy_loss', 'value_loss','total_loss']):
-  #          print('================')
-  #          print(name)
-  #          print(var)
-  #          print('================')
-
-        lr = lr - lr_decay_step if lr > min_lr else lr
-
-        #import pdb; pdb.set_trace()
-
-        acts[:] = 0
-        rews[:] = 0
-        obs[:] = 0
-        t = 0
-
-  def learn(self):
-    ths = [threading.Thread(target=self.learning_thread, args=(i,)) for i in
-      range(self.config['num_threads'])]
-
-    for t in ths:
-      t.start()
 
 def main():
   agent = ACAgent(gamma=0.99, n_iter=1000000, num_threads=8, t_max=5,
