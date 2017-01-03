@@ -5,6 +5,17 @@ import threading
 from collections import deque
 from PIL import Image, ImageOps
 
+import os
+import signal
+import sys
+import time
+
+np.set_printoptions(threshold=10000)
+
+def handle_pdb(sig, frame):
+  import pdb
+  pdb.Pdb().set_trace(frame)
+
 def categorical_sample(prob):
   """
   Sample from categorical distribution,
@@ -14,16 +25,35 @@ def categorical_sample(prob):
   csprob = np.cumsum(prob)
   return (csprob > np.random.rand()).argmax()
 
-def weight_variable(name, shape):
-  d = 1.0 / np.sqrt(np.product(shape))
-  return tf.Variable(tf.random_uniform(shape, minval=-d, maxval=d), name=name)
+def weight_variable(name, shape, stddev):
+  return tf.get_variable(name,
+      shape=shape, initializer=tf.truncated_normal_initializer(stddev=stddev))
 
-def bias_variable(name, shape):
-  d = 1.0 / np.sqrt(np.product(shape))
-  return tf.Variable(tf.random_uniform(shape, minval=-d, maxval=d), name=name)
+def bias_variable(name, shape, value):
+  return tf.get_variable(name,
+      shape=shape, initializer=tf.constant_initializer(value=value))
 
-def conv2d(x,W,strides):
-  return tf.nn.conv2d(x,W,strides=strides, padding='SAME')
+def conv2d(x, W, strides):
+  return tf.nn.conv2d(x, W, strides=strides, padding='VALID')
+
+def resize_observation(observation, shape, centering):
+  img = Image.fromarray(observation)
+  img = ImageOps.fit(img, shape[:2], centering=centering)
+  img = img.convert('L')
+  return np.reshape(np.array(img), (1, *shape)) * 1./255.
+
+def _kernel_img_summary(img, shape, channel):
+  xx = shape[0] + 2
+  yy = shape[1] + 2
+
+  tmp1 = tf.slice(img,(0,0,channel,0),(-1,-1,1,-1))
+  tmp1 = tf.reshape(tmp1,(shape[0],shape[1],shape[3]))
+  tmp1 = tf.image.resize_image_with_crop_or_pad(tmp1,xx,yy)
+  tmp1 = tf.reshape(tmp1,(xx,yy,4,4))
+  tmp1 = tf.transpose(tmp1,(2,0,3,1))
+  tmp1 = tf.reshape(tmp1,(1,4*xx,4*yy,1))
+
+  return tmp1
 
 class ThreadModel(object):
   def __init__(self, input_shape, output_size, global_network, config):
@@ -40,32 +70,42 @@ class ThreadModel(object):
     self.lr = tf.placeholder(tf.float32, name='lr')
 
     with tf.variable_scope('policy_value_network') as thread_scope:
-      x_input = tf.transpose(self.ob, (0,2,3,1))
+      with tf.variable_scope('conv1'):
+        W_conv1 = weight_variable('W', [8, 8, input_shape[2], 16], 2./64.)
+        b_conv1 = bias_variable('b', [16], 0.1)
 
-      with tf.name_scope('conv1') as scope:
-        W_conv1 = weight_variable('W', [8, 8, input_shape[0], 16])
-        b_conv1 = bias_variable('b', [16])
-
-        h_conv1 = tf.nn.relu(conv2d(x_input, W_conv1, [1,4,4,1]) +
+        h_conv1 = tf.nn.relu(conv2d(self.ob, W_conv1, [1,4,4,1]) +
             b_conv1, name='h')
 
-      with tf.name_scope('conv2'):
-        W_conv2 = weight_variable('W', [4,4,16,32])
-        b_conv2 = bias_variable('b', [32])
+      if 'thread_0' in thread_scope.name:
+        kernel_summary = _kernel_img_summary(W_conv1, [8,8,1,16], 0)
+        tf.image_summary('conv1 kernels', kernel_summary)
+
+        activation_image = tf.slice(h_conv1, (0,0,0,0), (1,-1,-1,-1))
+        activation_image = tf.reshape(activation_image, (20,20,16))
+        activation_image = tf.image.resize_image_with_crop_or_pad(activation_image, 21, 21)
+        activation_image = tf.reshape(activation_image,(21,21,4,4))
+        activation_image = tf.transpose(activation_image, (2,0,3,1))
+        activation_image = tf.reshape(activation_image, (1,4*21,4*21,1))
+        tf.image_summary('activation image', activation_image)
+
+      with tf.variable_scope('conv2'):
+        W_conv2 = weight_variable('W', [4,4,16,32], 2./256)
+        b_conv2 = bias_variable('b', [32], 0.01)
 
         h_conv2 = tf.nn.relu(conv2d(h_conv1, W_conv2, [1,2,2,1]) +
             b_conv2, name='h')
 
-      with tf.name_scope('fc1'):
-        conv2_out_size = 3872
-        W_fc1 = weight_variable('W', [conv2_out_size, 256])
-        b_fc1 = bias_variable('b', [256])
+      with tf.variable_scope('fc1'):
+        conv2_out_size = 2592
+        W_fc1 = weight_variable('W', [conv2_out_size, 256], 2./conv2_out_size)
+        b_fc1 = bias_variable('b', [256], 0.001)
 
         h_conv2_flat = tf.reshape(h_conv2, [-1, conv2_out_size])
         h_fc1 = tf.nn.relu(tf.matmul(h_conv2_flat, W_fc1) + b_fc1, name='h')
 
-        nn_outputs = h_fc1
-        nn_output_size = 256
+      nn_outputs = h_fc1
+      nn_output_size = 256
 
       if use_rnn:
         lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
@@ -82,16 +122,19 @@ class ThreadModel(object):
         nn_output_size = rnn_size
         nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
-      d = 1.0 / np.sqrt(nn_output_size)
-      W_softmax = tf.Variable(tf.random_uniform([nn_output_size, output_size],
-        minval=-d, maxval=d), name='W_softmax')
-      b_softmax = tf.Variable(tf.random_uniform([output_size], minval=-d,
-        maxval=d), name='b_softmax')
+      #W_softmax = tf.Variable(tf.random_uniform([nn_output_size, output_size],
+      #  minval=-d, maxval=d), name='W_softmax')
+      #b_softmax = tf.Variable(tf.random_uniform([output_size], minval=-d,
+      #  maxval=d), name='b_softmax')
+      W_softmax = weight_variable('W_softmax', [nn_output_size, output_size], 1./nn_output_size)
+      b_softmax = bias_variable('b_softmax', [output_size], 0.0)
 
-      W_linear = tf.Variable(tf.random_uniform([nn_output_size, 1], minval=-d,
-        maxval=d), name='W_linear')
-      b_linear = tf.Variable(tf.random_uniform([1], minval=-d, maxval=d),
-        name='b_linear')
+      W_linear = weight_variable('W_linear', [nn_output_size, 1], 1./nn_output_size)
+      b_linear = bias_variable('b_linear', [1], 0.0)
+      #W_linear = tf.Variable(tf.random_uniform([nn_output_size, 1], minval=-d,
+      #  maxval=d), name='W_linear')
+      #b_linear = tf.Variable(tf.random_uniform([1], minval=-d, maxval=d),
+      #  name='b_linear')
 
     # Variable collections for update computations
     self.trainable_variables = tf.get_collection(
@@ -102,6 +145,7 @@ class ThreadModel(object):
     if global_network is None:
       self.gradient_mean_square = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.trainable_variables]
+      self.saver = tf.train.Saver(tf.all_variables())
     else:
       with tf.name_scope('outputs'):
         self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
@@ -114,27 +158,46 @@ class ThreadModel(object):
           (-1, output_size))
         masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
           reduction_indices=1, keep_dims=True)
-        log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-10, 1.0))
+        log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-22, 1.0))
         td_error = self.rew - self.val
-        policy_loss = -log_masked_prob * td_error
-        value_loss = tf.nn.l2_loss(td_error)
-        entropy = tf.reduce_sum(masked_prob * log_masked_prob) * entropy_beta
-        total_loss = tf.reduce_mean(policy_loss + 0.5 * value_loss) + entropy
+        entropy = -tf.reduce_sum(masked_prob * log_masked_prob, reduction_indices=1, keep_dims=True) * entropy_beta
+        policy_loss = -(log_masked_prob * td_error + entropy)
+        value_loss = td_error ** 2. / 2.
+        #total_loss = tf.reduce_sum(policy_loss + 0.5 * value_loss)
+        total_loss = policy_loss + 0.5 * value_loss
+
+        value_loss_summary = tf.scalar_summary('value_loss', tf.reduce_mean(value_loss))
+        policy_loss_summary = tf.scalar_summary('policy_loss', tf.reduce_mean(policy_loss))
+        total_loss_summary = tf.scalar_summary('total_loss', tf.reduce_mean(total_loss))
+        entropy_summary = tf.scalar_summary('entropy', tf.reduce_mean(entropy))
+        max_prob_summary = tf.scalar_summary('max_prob', tf.reduce_max(self.pol_prob))
+        td_error_summary = tf.scalar_summary('td_error', tf.reduce_mean(td_error))
 
       with tf.name_scope('gradients'):
         self.grads = tf.gradients(total_loss, self.trainable_variables)
+
+        for grad in self.grads:
+          tf.scalar_summary('grad_' + grad.name, tf.reduce_mean(grad))
+
+      for var in self.trainable_variables:
+        tf.scalar_summary('var_' + '/'.join(var.name.split('/')[-3:]), tf.reduce_mean(var))
 
       with tf.name_scope('updates'):
         self.updates = self.get_rms_updates(global_network.trainable_variables,
           self.trainable_variables, self.grads,
           global_network.gradient_mean_square, decay=rms_decay)
 
+      self.dbg = [self.pol_prob, masked_prob, td_error, entropy, policy_loss, value_loss, total_loss]
+      #self.dbg = h_fc1
+      self.summary_op = tf.merge_all_summaries()
+
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq,
-                  decay=0.9, epsilon=1e-10, grad_norm_clip=50.):
+                  decay=0.99, epsilon=1e-10, grad_norm_clip=50.):
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
       grad = tf.clip_by_norm(grad, grad_norm_clip)
       msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
+      tf.scalar_summary('msq_' + msq.name, tf.reduce_mean(msq))
       with tf.control_dependencies([msq_update]):
         gradient_update = -self.lr * grad / tf.sqrt(msq + epsilon)
         l_to_g = Wg.assign_add(gradient_update)
@@ -147,6 +210,11 @@ class ThreadModel(object):
         updates += [g_to_l]
 
     return updates
+
+global_model = None
+thr_models = []
+envs = None
+sess = None
 
 class ACAgent(object):
   def __init__(self, **usercfg):
@@ -169,50 +237,50 @@ class ACAgent(object):
 
     self.config.update(usercfg)
 
-    self.envs = [gym.make(self.config['env_name']) for _ in
+    global envs, thr_models, global_model
+    envs = [gym.make(self.config['env_name']) for _ in
       range(self.config['num_threads'])]
-    input_shape = (3,84,84)
-    action_num = self.envs[0].action_space.n
+    input_shape = (84,84,1)
+    action_num = envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
     with tf.variable_scope('global'):
       global_model = ThreadModel(input_shape, action_num, None, self.config)
 
-    self.thr_models = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
         thr_model = ThreadModel(input_shape, action_num, global_model,
           self.config)
-        self.thr_models.append(thr_model)
+        thr_models.append(thr_model)
 
-    self.sess = tf.Session()
-    self.sess.run(tf.initialize_all_variables())
+    global sess
+    sess = tf.Session()
+    sess.run(tf.initialize_all_variables())
 
   def reset_rnn_state(self, rnn_size):
+    # TODO: This is wrong. rnn_states should be per thread, not shared.
     self.running_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
       np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
     self.training_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
       np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
 
   def act(self, ob, model):
+    global sess
     if self.use_rnn:
-      prob, self.running_rnn_state = self.sess.run(
+      prob, self.running_rnn_state = sess.run(
         [model.pol_prob, model.rnn_state_after],
         {model.ob:ob,
          model.rnn_state_initial_c:self.running_rnn_state[0],
          model.rnn_state_initial_h:self.running_rnn_state[1],
         })
     else:
-      prob = self.sess.run(model.pol_prob, {model.ob:ob})
+      prob = sess.run(model.pol_prob, {model.ob:ob})
     action = categorical_sample(prob)
     return action
 
-  def resize_observation(self, observation, shape, centering):
-    img = Image.fromarray(observation)
-    img = ImageOps.fit(img, shape[1:], centering=centering)
-    return np.reshape(img, (1, *shape))
 
   def learning_thread(self, thread_id):
+    global envs, thr_models, sess
     t_max = self.config['t_max']
     lr = self.config['lr']
     min_lr = self.config['min_lr']
@@ -221,10 +289,10 @@ class ACAgent(object):
     self.use_rnn = self.config['use_rnn']
     rnn_size = self.config['rnn_size']
 
-    env = self.envs[thread_id]
-    model = self.thr_models[thread_id]
+    env = envs[thread_id]
+    model = thr_models[thread_id]
 
-    ob_shape = (3,84,84)
+    ob_shape = (84,84,1)
     crop_centering = (0.5, 0.7)
     obs = np.zeros((t_max, *ob_shape))
     acts = np.zeros((t_max))
@@ -234,6 +302,9 @@ class ACAgent(object):
     ep_count = 0
     rews_acc = deque(maxlen=100)
 
+    if thread_id == 0:
+      self.summary_writer = tf.train.SummaryWriter('train', sess.graph)
+
     if self.use_rnn:
       self.reset_rnn_state(rnn_size)
 
@@ -241,12 +312,13 @@ class ACAgent(object):
     done = True
     for iteration in range(self.config['n_iter']):
       if done:
+        if thread_id == 0 and ep_count % 100 == 0:
+          global_model.saver.save(sess, 'train/model.ckpt', global_step=iteration)
         if self.use_rnn:
           self.reset_rnn_state(rnn_size)
         done = False
         ob = env.reset()
-        ob = self.resize_observation(ob, ob_shape, crop_centering)
-        ob = np.reshape(ob, (1, *ob_shape))
+        ob = resize_observation(ob, ob_shape, crop_centering)
         rews_acc.append(ep_rews)
         ep_count += 1
         print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
@@ -257,7 +329,7 @@ class ACAgent(object):
         obs[t] = ob
         action = self.act(ob, model)
         ob, rew, done, _ = env.step(action)
-        ob = self.resize_observation(ob, ob_shape, crop_centering)
+        ob = resize_observation(ob, ob_shape, crop_centering)
         acts[t] = action
         rews[t] = rew if not done else 0
         t += 1
@@ -271,14 +343,14 @@ class ACAgent(object):
           R = 0
         else:
           if self.use_rnn:
-            R = self.sess.run(
+            R = sess.run(
               model.val,
               {model.ob:ob,
                model.rnn_state_initial_c:self.running_rnn_state[0],
                model.rnn_state_initial_h:self.running_rnn_state[1],
               })
           else:
-            R = self.sess.run(model.val, {model.ob:ob})
+            R = sess.run(model.val, {model.ob:ob})
 
         R_arr = np.zeros((t, 1))
         for i in reversed(range(t)):
@@ -286,7 +358,7 @@ class ACAgent(object):
           R_arr[i, 0] = R
 
         if self.use_rnn:
-          _, self.training_rnn_state = self.sess.run(
+          _, self.training_rnn_state = sess.run(
             [model.updates, model.rnn_state_after],
             {model.ob:obs_arr,
              model.ac:acts_arr,
@@ -296,15 +368,32 @@ class ACAgent(object):
              model.rnn_state_initial_h:self.training_rnn_state[1],
             })
         else:
-          _ = self.sess.run(
-            model.updates,
+          _, dbg = sess.run(
+            [model.updates, model.dbg],
             {model.ob:obs_arr,
              model.ac:acts_arr,
              model.rew:R_arr,
              model.lr:lr,
             })
 
+        if thread_id == 0 and ep_count % 10 == 0 and done == True:
+          summary_str = sess.run(model.summary_op,
+            {model.ob:obs_arr,
+             model.ac:acts_arr,
+             model.rew:R_arr})
+          self.summary_writer.add_summary(summary_str, iteration)
+          #print(dbg)
+
+  #      if thread_id == 0:
+  #        for var, name in zip(dbg, ['pol_prob', 'masked_prob', 'td_error', 'entropy', 'policy_loss', 'value_loss','total_loss']):
+  #          print('================')
+  #          print(name)
+  #          print(var)
+  #          print('================')
+
         lr = lr - lr_decay_step if lr > min_lr else lr
+
+        #import pdb; pdb.set_trace()
 
         acts[:] = 0
         rews[:] = 0
@@ -319,11 +408,12 @@ class ACAgent(object):
       t.start()
 
 def main():
-    agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=8, t_max=5,
-      lr=0.01, min_lr=0.0001, lr_decay_no_steps=30000, hidden_1=100,
-      rnn_size=100, env_name='Breakout-v0', use_rnn=False, entropy_beta=0.01,
-      rms_decay=0.9)
-    agent.learn()
+  signal.signal(signal.SIGUSR1, handle_pdb)
+  agent = ACAgent(gamma=0.99, n_iter=1000000, num_threads=8, t_max=5,
+    lr=0.001, min_lr=0.00001, lr_decay_no_steps=1000000, hidden_1=100,
+    rnn_size=100, env_name='Breakout-v0', use_rnn=False, entropy_beta=0.01,
+    rms_decay=0.99)
+  agent.learn()
 
 if __name__ == "__main__":
   main()
