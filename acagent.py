@@ -172,7 +172,7 @@ class ThreadModel(object):
 
       updates += [gradient_update, local_to_global, msq_update]
 
-    # control dependecies make sure local to global updates are completed
+    # control dependencies make sure local to global updates are completed
     # before global to local updates.
     with tf.control_dependencies(updates):
       for Wg, Wl in zip(global_vars, local_vars):
