@@ -30,7 +30,6 @@ class ThreadModel(object):
     self.ob = tf.placeholder(tf.float32, (None, *input_shape), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
-    self.lr = tf.placeholder(tf.float32, name='lr')
 
     with tf.variable_scope('policy_value_network') as thread_scope:
       with tf.variable_scope('conv1'):
@@ -94,6 +93,20 @@ class ThreadModel(object):
       self.gradient_mean_square = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.trainable_variables]
       self.saver = tf.train.Saver(tf.all_variables())
+
+      self.lr_decay = tf.get_variable('lr_decay', initializer=tf.constant(0.000001))
+      self.lr = tf.get_variable('lr', initializer=tf.constant(0.001))
+      self.min_lr = tf.get_variable('min_lr', initializer=tf.constant(0.001))
+
+      self.initial_lr = tf.placeholder(tf.float32, name='initial_lr')
+      self.initial_lr_decay = tf.placeholder(tf.float32, name='initial_lr_decay')
+      self.initial_min_lr = tf.placeholder(tf.float32, name='initial_min_lr')
+
+      assign_lr = self.lr.assign(self.initial_lr)
+      assign_lr_decay = self.lr_decay.assign(self.initial_lr_decay)
+      assign_min_lr = self.min_lr.assign(self.initial_min_lr)
+
+      self.lr_setup = [assign_lr, assign_lr_decay, assign_min_lr]
     else:
       with tf.name_scope('outputs'):
         self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
@@ -120,7 +133,15 @@ class ThreadModel(object):
       with tf.name_scope('updates'):
         self.updates = self.get_rms_updates(global_network.trainable_variables,
           self.trainable_variables, self.grads,
-          global_network.gradient_mean_square, decay=rms_decay)
+          global_network.gradient_mean_square, global_network.lr, decay=rms_decay,
+          grad_norm_clip=grad_norm_clip_val)
+
+        lr_update = tf.cond(tf.greater(global_network.lr,
+          global_network.min_lr),
+          lambda: global_network.lr.assign(
+            global_network.lr - global_network.lr_decay),
+          lambda: global_network.lr)
+        self.updates += [lr_update]
 
       # Get summaries for thread 0
       if 'thread_0' in thread_scope.name:
@@ -133,6 +154,7 @@ class ThreadModel(object):
         tf.scalar_summary('entropy', tf.reduce_mean(entropy))
         tf.scalar_summary('max_prob', tf.reduce_max(self.pol_prob))
         tf.scalar_summary('td_error', tf.reduce_mean(td_error))
+        tf.scalar_summary('learning_rate', global_network.lr)
 
         for grad in self.grads:
           summary_name = 'grad_' + '/'.join(grad.name.split('/')[-3:])
@@ -148,7 +170,7 @@ class ThreadModel(object):
 
         self.summary_op = tf.merge_all_summaries()
 
-  def get_rms_updates(self, global_vars, local_vars, grads, grad_msq,
+  def get_rms_updates(self, global_vars, local_vars, grads, grad_msq, lr,
                       decay=0.99, epsilon=1e-10, grad_norm_clip=50.):
     """
     Compute shared RMSProp updates for local_vars.
@@ -167,7 +189,7 @@ class ThreadModel(object):
 
       # control dependecies make sure msq is updated before gradients
       with tf.control_dependencies([msq_update]):
-        gradient_update = -self.lr * grad / tf.sqrt(msq + epsilon)
+        gradient_update = -lr * grad / tf.sqrt(msq + epsilon)
         local_to_global = Wg.assign_add(gradient_update)
 
       updates += [gradient_update, local_to_global, msq_update]
@@ -215,17 +237,15 @@ def bootstrap_return(session, model, observation, running_rnn_state):
       })
   else:
     R = session.run(model.val, {model.ob:observation})
-
   return R
 
-def run_updates(session, model, obs_arr, acts_arr, R_arr, lr, training_rnn_state):
+def run_updates(session, model, obs_arr, acts_arr, R_arr, training_rnn_state):
   if training_rnn_state is not None:
     _, training_rnn_state = session.run(
       [model.updates, model.rnn_state_after],
       {model.ob:obs_arr,
        model.ac:acts_arr,
        model.rew:R_arr,
-       model.lr:lr,
        model.rnn_state_initial_c:training_rnn_state[0],
        model.rnn_state_initial_h:training_rnn_state[1],
       })
@@ -235,9 +255,7 @@ def run_updates(session, model, obs_arr, acts_arr, R_arr, lr, training_rnn_state
       {model.ob:obs_arr,
        model.ac:acts_arr,
        model.rew:R_arr,
-       model.lr:lr,
       })
-
   return training_rnn_state
 
 def reset_rnn_state(rnn_size):
@@ -258,10 +276,6 @@ def discounted_returns(rews, gamma, R, t):
 
 def learning_thread(thread_id, config, session, model, global_model, env):
   t_max = config['t_max']
-  lr = config['lr']
-  min_lr = config['min_lr']
-  lr_decay_no_steps = config['lr_decay_no_steps']
-  lr_decay_step = (lr - min_lr)/lr_decay_no_steps
   use_rnn = config['use_rnn']
   rnn_size = config['rnn_size']
 
@@ -322,9 +336,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       R_arr = discounted_returns(rews, config['gamma'], R, t)
 
       training_rnn_state = run_updates(session, model, obs_arr, acts_arr,
-        R_arr, lr, training_rnn_state)
-
-      lr = lr - lr_decay_step if lr > min_lr else lr
+        R_arr, training_rnn_state)
 
       acts[:] = 0
       rews[:] = 0
@@ -370,6 +382,11 @@ class ACAgent(object):
     self.action_num = self.envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
+    lr = self.config['lr']
+    min_lr = self.config['min_lr']
+    lr_decay_no_steps = self.config['lr_decay_no_steps']
+    lr_decay_step = (lr - min_lr)/lr_decay_no_steps
+
     with tf.variable_scope('global'):
       self.global_model = ThreadModel(self.input_shape, self.action_num, None,
         self.config)
@@ -383,6 +400,11 @@ class ACAgent(object):
 
     self.session = tf.Session()
     self.session.run(tf.initialize_all_variables())
+
+    self.session.run(self.global_model.lr_setup,
+      {self.global_model.initial_lr:lr,
+       self.global_model.initial_lr_decay:lr_decay_step,
+       self.global_model.initial_min_lr:min_lr})
 
   def learn(self):
     threads = []
