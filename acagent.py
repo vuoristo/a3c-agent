@@ -265,17 +265,18 @@ def discounted_returns(rews, gamma, R, t):
   for i in reversed(range(t)):
     R = rews[i] + gamma * R
     R_arr[i, 0] = R
-
   return R_arr
 
 def learning_thread(thread_id, config, session, model, global_model, env):
   t_max = config['t_max']
   use_rnn = config['use_rnn']
   rnn_size = config['rnn_size']
+  window_size = config['window_size']
+  gamma = config['gamma']
 
   ob_shape = (84,84,1)
   crop_centering = (0.5, 0.7)
-  obs = np.zeros((t_max, *ob_shape))
+  obs = np.zeros((t_max + window_size, *ob_shape))
   acts = np.zeros((t_max))
   rews = np.zeros((t_max))
 
@@ -298,6 +299,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       done = False
       ob = env.reset()
       ob = resize_observation(ob, ob_shape, crop_centering)
+      obs[:] = ob
 
       if use_rnn:
         running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
@@ -309,8 +311,16 @@ def learning_thread(thread_id, config, session, model, global_model, env):
             np.mean(rews_acc), lr))
       ep_rews = 0
     else:
-      obs[t] = ob
-      action = act(ob, model, session, use_rnn)
+      obs_current_index = iteration % (t_max + window_size)
+      obs[obs_current_index] = ob
+
+      obs_start_index = obs_current_index - window_size
+      obs_window_indices = np.arange(obs_start_index, obs_current_index)
+      ob_w = obs[obs_window_indices]
+      ob_w = np.transpose(ob_w, (3,1,2,0))
+
+      action = act(ob_w, model, session, use_rnn)
+
       ob, rew, done, _ = env.step(action)
       ob = resize_observation(ob, ob_shape, crop_centering)
       acts[t] = action
@@ -319,13 +329,19 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       ep_rews += rew
 
     if done or t == t_max:
-      obs_arr = np.reshape(obs[:t], (t, *ob_shape))
+      obs_current_index = iteration % (t_max + window_size)
+      obs_start_index = obs_current_index - t
+      obs_indices = [np.arange(i - window_size + 1, i + 1) for i in np.arange(obs_start_index, obs_current_index)]
+      obs_indices = np.reshape(obs_indices, (t, window_size)) % (t_max + window_size)
+      obs_arr = obs[obs_indices]
+      obs_arr = np.transpose(np.reshape(obs_arr, (t,window_size,84,84)), (0,2,3,1))
+
       acts_arr = np.reshape(acts[:t], (t, 1))
 
       if done:
         R = 0
       else:
-        R = bootstrap_return(session, model, ob, running_rnn_state)
+        R = bootstrap_return(session, model, ob_w, running_rnn_state)
 
       R_arr = discounted_returns(rews, config['gamma'], R, t)
 
@@ -334,7 +350,6 @@ def learning_thread(thread_id, config, session, model, global_model, env):
 
       acts[:] = 0
       rews[:] = 0
-      obs[:] = 0
       t = 0
 
       if thread_id == 0 and ep_count % 10 == 0 and done == True:
@@ -361,6 +376,7 @@ class ACAgent(object):
         rnn_size = 10,
         use_rnn = True,
         num_threads = 1,
+        window_size = 4,
         env_name = '',
         entropy_beta = 0.01,
         grad_norm_clip_val = 100.,
@@ -372,7 +388,7 @@ class ACAgent(object):
     self.envs = [gym.make(self.config['env_name']) for _ in
       range(self.config['num_threads'])]
 
-    self.input_shape = (84,84,1)
+    self.input_shape = (84,84,4)
     self.action_num = self.envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
