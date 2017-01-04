@@ -20,7 +20,6 @@ def conv2d(x, W, strides):
 
 class ThreadModel(object):
   def __init__(self, input_shape, output_size, global_network, config):
-    W0_size = config['hidden_1']
     rnn_size = config['rnn_size']
     entropy_beta = config['entropy_beta']
     grad_norm_clip_val = config['grad_norm_clip_val']
@@ -257,7 +256,6 @@ def reset_rnn_state(rnn_size):
     np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
   training_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
     np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
-
   return running_rnn_state, training_rnn_state
 
 def discounted_returns(rews, gamma, R, t):
@@ -307,8 +305,8 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       rews_acc.append(ep_rews)
       ep_count += 1
       print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
-            '{:.1f} lr: {}'.format(thread_id, ep_count, ep_rews,
-            np.mean(rews_acc), lr))
+            '{:.1f}'.format(thread_id, ep_count, ep_rews,
+            np.mean(rews_acc)))
       ep_rews = 0
     else:
       obs_current_index = iteration % (t_max + window_size)
@@ -343,7 +341,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       else:
         R = bootstrap_return(session, model, ob_w, running_rnn_state)
 
-      R_arr = discounted_returns(rews, config['gamma'], R, t)
+      R_arr = discounted_returns(rews, gamma, R, t)
 
       training_rnn_state = run_updates(session, model, obs_arr, acts_arr,
         R_arr, training_rnn_state)
@@ -352,14 +350,14 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       rews[:] = 0
       t = 0
 
-      if thread_id == 0 and ep_count % 10 == 0 and done == True:
+      if thread_id == 0 and iteration % 100 == 0:
         summary_str = session.run(model.summary_op,
           {model.ob:obs_arr,
            model.ac:acts_arr,
            model.rew:R_arr})
         summary_writer.add_summary(summary_str, iteration)
 
-      if thread_id == 0 and ep_count % 100 == 0:
+      if thread_id == 0 and ep_count % 300 == 0:
         global_model.saver.save(session, 'train/model.ckpt',
           global_step=iteration)
 
@@ -372,14 +370,13 @@ class ACAgent(object):
         lr = 0.01,
         min_lr = 0.002,
         lr_decay_no_steps = 10000,
-        hidden_1 = 20,
         rnn_size = 10,
         use_rnn = True,
         num_threads = 1,
         window_size = 4,
         env_name = '',
         entropy_beta = 0.01,
-        grad_norm_clip_val = 100.,
+        grad_norm_clip_val = 50.,
         rms_decay = 0.99,
       )
 
@@ -419,10 +416,9 @@ class ACAgent(object):
       thread.start()
 
 def main():
-  agent = ACAgent(gamma=0.99, n_iter=1000000, num_threads=8, t_max=5,
-    lr=0.001, min_lr=0.00001, lr_decay_no_steps=1000000, hidden_1=100,
-    rnn_size=100, env_name='Breakout-v0', use_rnn=False, entropy_beta=0.01,
-    rms_decay=0.99)
+  agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=1, t_max=5, lr=0.001,
+    min_lr=0.000001, lr_decay_no_steps=10000000, rnn_size=100,
+    env_name='Breakout-v0', use_rnn=False, entropy_beta=0.01, rms_decay=0.99)
   agent.learn()
 
 if __name__ == "__main__":
