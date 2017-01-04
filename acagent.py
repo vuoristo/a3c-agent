@@ -409,9 +409,13 @@ class ACAgent(object):
   def learn(self):
     threads = []
     for i in range(self.config['num_threads']):
-      thread = threading.Thread(target=learning_thread, args=(
+      threads.append(threading.Thread(target=learning_thread, args=(
         i, self.config, self.session, self.thread_models[i], self.global_model,
-        self.envs[i]))
+        self.envs[i])))
+
+    self.session.graph.finalize()
+
+    for thread in threads:
       thread.start()
 
 def main():
