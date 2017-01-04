@@ -26,6 +26,10 @@ class ThreadModel(object):
     grad_norm_clip_val = config['grad_norm_clip_val']
     use_rnn = config['use_rnn']
     rms_decay = config['rms_decay']
+    initial_lr = config['lr']
+    initial_min_lr = config['min_lr']
+    lr_decay_no_steps = config['lr_decay_no_steps']
+    initial_lr_decay = (initial_lr - initial_min_lr)/lr_decay_no_steps
 
     self.ob = tf.placeholder(tf.float32, (None, *input_shape), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
@@ -94,19 +98,9 @@ class ThreadModel(object):
         dtype=np.float32)) for var in self.trainable_variables]
       self.saver = tf.train.Saver(tf.all_variables())
 
-      self.lr_decay = tf.get_variable('lr_decay', initializer=tf.constant(0.000001))
-      self.lr = tf.get_variable('lr', initializer=tf.constant(0.001))
-      self.min_lr = tf.get_variable('min_lr', initializer=tf.constant(0.001))
-
-      self.initial_lr = tf.placeholder(tf.float32, name='initial_lr')
-      self.initial_lr_decay = tf.placeholder(tf.float32, name='initial_lr_decay')
-      self.initial_min_lr = tf.placeholder(tf.float32, name='initial_min_lr')
-
-      assign_lr = self.lr.assign(self.initial_lr)
-      assign_lr_decay = self.lr_decay.assign(self.initial_lr_decay)
-      assign_min_lr = self.min_lr.assign(self.initial_min_lr)
-
-      self.lr_setup = [assign_lr, assign_lr_decay, assign_min_lr]
+      self.lr = tf.get_variable('lr_decay', initializer=tf.constant(initial_lr))
+      self.lr_decay = tf.get_variable('lr', initializer=tf.constant(initial_lr_decay))
+      self.min_lr = tf.get_variable('min_lr', initializer=tf.constant(initial_min_lr))
     else:
       with tf.name_scope('outputs'):
         self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
@@ -382,11 +376,6 @@ class ACAgent(object):
     self.action_num = self.envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
-    lr = self.config['lr']
-    min_lr = self.config['min_lr']
-    lr_decay_no_steps = self.config['lr_decay_no_steps']
-    lr_decay_step = (lr - min_lr)/lr_decay_no_steps
-
     with tf.variable_scope('global'):
       self.global_model = ThreadModel(self.input_shape, self.action_num, None,
         self.config)
@@ -400,11 +389,6 @@ class ACAgent(object):
 
     self.session = tf.Session()
     self.session.run(tf.initialize_all_variables())
-
-    self.session.run(self.global_model.lr_setup,
-      {self.global_model.initial_lr:lr,
-       self.global_model.initial_lr_decay:lr_decay_step,
-       self.global_model.initial_min_lr:min_lr})
 
   def learn(self):
     threads = []
