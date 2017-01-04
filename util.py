@@ -11,7 +11,7 @@ def _kernel_img_summary(img, shape, name):
   tmp = tf.transpose(tmp,(2,0,3,1))
   tmp = tf.reshape(tmp,(1,4*xx,4*yy,1))
 
-  return tf.image_summary(name, tmp)
+  return tf.summary.image(name, tmp)
 
 def _activation_summary(img, shape, name):
   xx = shape[0] + 1
@@ -24,4 +24,4 @@ def _activation_summary(img, shape, name):
   tmp = tf.transpose(tmp, (2,0,3,1))
   tmp = tf.reshape(tmp, (1,4*xx,4*yy,1))
 
-  return tf.image_summary('activation image', tmp)
+  return tf.summary.image('activation image', tmp)

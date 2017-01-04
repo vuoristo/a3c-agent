@@ -96,7 +96,7 @@ class ThreadModel(object):
     if global_network is None:
       self.gradient_mean_square = [tf.Variable(np.zeros(var.get_shape(),
         dtype=np.float32)) for var in self.trainable_variables]
-      self.saver = tf.train.Saver(tf.all_variables())
+      self.saver = tf.train.Saver(tf.global_variables())
 
       self.lr = tf.get_variable('lr_decay', initializer=tf.constant(initial_lr))
       self.lr_decay = tf.get_variable('lr', initializer=tf.constant(initial_lr_decay))
@@ -142,27 +142,27 @@ class ThreadModel(object):
         _kernel_img_summary(W_conv1, [8,8,1,16], 'conv1 kernels')
         _activation_summary(h_conv1, (20,20,16), 'conv1 activation')
 
-        tf.scalar_summary('value_loss', tf.reduce_mean(value_loss))
-        tf.scalar_summary('policy_loss', tf.reduce_mean(policy_loss))
-        tf.scalar_summary('total_loss', tf.reduce_mean(total_loss))
-        tf.scalar_summary('entropy', tf.reduce_mean(entropy))
-        tf.scalar_summary('max_prob', tf.reduce_max(self.pol_prob))
-        tf.scalar_summary('td_error', tf.reduce_mean(td_error))
-        tf.scalar_summary('learning_rate', global_network.lr)
+        tf.summary.scalar('value_loss', tf.reduce_mean(value_loss))
+        tf.summary.scalar('policy_loss', tf.reduce_mean(policy_loss))
+        tf.summary.scalar('total_loss', tf.reduce_mean(total_loss))
+        tf.summary.scalar('entropy', tf.reduce_mean(entropy))
+        tf.summary.scalar('max_prob', tf.reduce_max(self.pol_prob))
+        tf.summary.scalar('td_error', tf.reduce_mean(td_error))
+        tf.summary.scalar('learning_rate', global_network.lr)
 
         for grad in self.grads:
           summary_name = 'grad_' + '/'.join(grad.name.split('/')[-3:])
-          tf.scalar_summary(summary_name, tf.reduce_mean(grad))
+          tf.summary.scalar(summary_name, tf.reduce_mean(grad))
 
         for msq in global_network.gradient_mean_square:
           summary_name = 'msq_' + '/'.join(msq.name.split('/')[-3:])
-          tf.scalar_summary(summary_name, tf.reduce_mean(msq))
+          tf.summary.scalar(summary_name, tf.reduce_mean(msq))
 
         for var in self.trainable_variables:
           summary_name = 'var_' + '/'.join(var.name.split('/')[-3:])
-          tf.scalar_summary(summary_name, tf.reduce_mean(var))
+          tf.summary.scalar(summary_name, tf.reduce_mean(var))
 
-        self.summary_op = tf.merge_all_summaries()
+        self.summary_op = tf.summary.merge_all()
 
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq, lr,
                       decay=0.99, epsilon=1e-10, grad_norm_clip=50.):
@@ -288,7 +288,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   training_rnn_state = None
 
   if thread_id == 0:
-    summary_writer = tf.train.SummaryWriter('train', session.graph)
+    summary_writer = tf.summary.FileWriter('train', session.graph)
 
   # Training loop
   t = 0
@@ -388,7 +388,7 @@ class ACAgent(object):
         self.thread_models.append(thr_model)
 
     self.session = tf.Session()
-    self.session.run(tf.initialize_all_variables())
+    self.session.run(tf.global_variables_initializer())
 
   def learn(self):
     threads = []
