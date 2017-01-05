@@ -267,12 +267,20 @@ def discounted_returns(rews, gamma, R, t):
     R_arr[i, 0] = R
   return R_arr
 
+def new_random_game(env, random_starts, action_size):
+  ob = env.reset()
+  no_rnd = np.random.randint(0, random_starts)
+  for i in range(no_rnd):
+    ob, _, _, _ = env.step(np.random.randint(action_size))
+  return ob
+
 def learning_thread(thread_id, config, session, model, global_model, env):
   t_max = config['t_max']
   use_rnn = config['use_rnn']
   rnn_size = config['rnn_size']
   window_size = config['window_size']
   gamma = config['gamma']
+  random_starts = config['random_starts']
 
   ob_shape = (84,84,1)
   crop_centering = (0.5, 0.7)
@@ -297,7 +305,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   for iteration in range(config['n_iter']):
     if done:
       done = False
-      ob = env.reset()
+      ob = new_random_game(env, random_starts, env.action_space.n)
       ob = resize_observation(ob, ob_shape, crop_centering)
       obs[:] = ob
 
@@ -380,6 +388,7 @@ class ACAgent(object):
         entropy_beta = 0.01,
         grad_norm_clip_val = 50.,
         rms_decay = 0.99,
+        random_starts=30,
       )
 
     self.config.update(usercfg)
