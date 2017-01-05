@@ -356,10 +356,6 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       training_rnn_state = run_updates(session, model, obs_arr, acts_arr,
         R_arr, training_rnn_state)
 
-      acts[:] = 0
-      rews[:] = 0
-      t = 0
-
       if thread_id == 0 and iteration % 100 == 0:
         summary_str = session.run(model.summary_op,
           {model.ob:obs_arr,
@@ -370,6 +366,10 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       if thread_id == 0 and ep_count % 300 == 0:
         global_model.saver.save(session, 'train/model.ckpt',
           global_step=iteration)
+
+      acts[:] = 0
+      rews[:] = 0
+      t = 0
 
 class ACAgent(object):
   def __init__(self, **usercfg):
