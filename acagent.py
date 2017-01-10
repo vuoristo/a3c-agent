@@ -112,12 +112,10 @@ class ThreadModel(object):
         masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
           reduction_indices=1, keep_dims=True)
         log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-22, 1.0))
-        td_error = tf.identity(self.rew - self.val)
-        entropy = -tf.reduce_sum(masked_prob * log_masked_prob,
-          reduction_indices=1, keep_dims=True) * entropy_beta
-        policy_loss = -(log_masked_prob * td_error + entropy)
+        td_error = self.rew - tf.stop_gradient(self.val)
+        policy_loss = -(log_masked_prob * td_error)
         value_loss = 0.5 * (self.rew - self.val) ** 2.
-        total_loss = policy_loss + 0.5 * value_loss
+        total_loss = tf.reduce_sum(policy_loss + 0.5 * value_loss)
 
       with tf.name_scope('gradients'):
         self.grads = tf.gradients(total_loss, self.trainable_variables)
@@ -145,7 +143,6 @@ class ThreadModel(object):
           tf.summary.scalar('value_loss', tf.reduce_mean(value_loss))
           tf.summary.scalar('policy_loss', tf.reduce_mean(policy_loss))
           tf.summary.scalar('total_loss', tf.reduce_mean(total_loss))
-          tf.summary.scalar('entropy', tf.reduce_mean(entropy))
           tf.summary.scalar('max_prob', tf.reduce_max(self.pol_prob))
           tf.summary.scalar('td_error', tf.reduce_mean(td_error))
           tf.summary.scalar('learning_rate', global_network.lr)
