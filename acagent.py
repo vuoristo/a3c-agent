@@ -26,7 +26,6 @@ class ThreadModel(object):
   def __init__(self, input_shape, output_size, global_network, config):
     rnn_size = config['rnn_size']
     entropy_beta = config['entropy_beta']
-    grad_norm_clip_val = config['grad_norm_clip_val']
     use_rnn = config['use_rnn']
     rms_decay = config['rms_decay']
     initial_lr = config['lr']
@@ -121,10 +120,13 @@ class ThreadModel(object):
         self.grads = tf.gradients(total_loss, self.trainable_variables)
 
       with tf.name_scope('updates'):
-        self.updates = self.get_rms_updates(global_network.trainable_variables,
-          self.trainable_variables, self.grads,
-          global_network.gradient_mean_square, global_network.lr, decay=rms_decay,
-          grad_norm_clip=grad_norm_clip_val)
+        self.updates = self.get_rms_updates(
+          global_network.trainable_variables,
+          self.trainable_variables,
+          self.grads,
+          global_network.gradient_mean_square,
+          global_network.lr,
+          decay=rms_decay)
 
         lr_update = tf.cond(tf.greater(global_network.lr,
           global_network.min_lr),
@@ -162,7 +164,7 @@ class ThreadModel(object):
           self.summary_op = tf.summary.merge_all()
 
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq, lr,
-                      decay=0.99, epsilon=1e-10, grad_norm_clip=50.):
+                      decay=0.99, epsilon=1e-20):
     """
     Compute shared RMSProp updates for local_vars.
     global_vars - stores the global variables shared by all threads
@@ -171,11 +173,9 @@ class ThreadModel(object):
     grad_msq - globally stored mean of squared gradients
     decay - the momentum parameter
     epsilon - for numerical stability
-    grad_norm_clip - gradient norm clipping amount
     """
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
-      grad = tf.clip_by_norm(grad, grad_norm_clip)
       msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
 
       # control dependecies make sure msq is updated before gradients
@@ -382,7 +382,6 @@ class ACAgent(object):
         window_size = 4,
         env_name = '',
         entropy_beta = 0.01,
-        grad_norm_clip_val = 50.,
         rms_decay = 0.99,
         random_starts=30,
       )
