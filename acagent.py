@@ -108,11 +108,12 @@ class ThreadModel(object):
       with tf.name_scope('targets'):
         actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
           (-1, output_size))
-        masked_prob = tf.reduce_sum(actions_one_hot * self.pol_prob,
+        log_prob = tf.log(tf.clip_by_value(self.pol_prob, 1.e-22, 1.0))
+        masked_log_prob = tf.reduce_sum(actions_one_hot * log_prob,
           reduction_indices=1, keep_dims=True)
-        log_masked_prob = tf.log(tf.clip_by_value(masked_prob, 1.e-22, 1.0))
+        entropy = -tf.reduce_sum(log_prob * self.pol_prob, reduction_indices=1) * entropy_beta
         td_error = self.rew - tf.stop_gradient(self.val)
-        policy_loss = -(log_masked_prob * td_error)
+        policy_loss = -(masked_log_prob * td_error + entropy)
         value_loss = 0.5 * (self.rew - self.val) ** 2.
         total_loss = tf.reduce_sum(policy_loss + 0.5 * value_loss)
 
