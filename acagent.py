@@ -40,14 +40,14 @@ class ThreadModel(object):
     with tf.variable_scope('policy_value_network') as thread_scope:
       with tf.variable_scope('conv1'):
         W_conv1 = weight_variable_conv('W', [8,8,input_shape[2],16])
-        b_conv1 = bias_variable('b', [16], 0)
+        b_conv1 = bias_variable('b', [16], 0.001)
 
         h_conv1 = tf.nn.relu(conv2d(self.ob, W_conv1, [1,4,4,1]) +
           b_conv1, name='h')
 
       with tf.variable_scope('conv2'):
         W_conv2 = weight_variable_conv('W', [4,4,16,32])
-        b_conv2 = bias_variable('b', [32], 0)
+        b_conv2 = bias_variable('b', [32], 0.001)
 
         h_conv2 = tf.nn.relu(conv2d(h_conv1, W_conv2, [1,2,2,1]) +
           b_conv2, name='h')
@@ -55,7 +55,7 @@ class ThreadModel(object):
       with tf.variable_scope('fc1'):
         conv2_out_size = 2592
         W_fc1 = weight_variable('W', [conv2_out_size, 256])
-        b_fc1 = bias_variable('b', [256], 0.0)
+        b_fc1 = bias_variable('b', [256], 0.001)
 
         h_conv2_flat = tf.reshape(h_conv2, [-1, conv2_out_size])
         h_fc1 = tf.nn.relu(tf.matmul(h_conv2_flat, W_fc1) + b_fc1, name='h')
@@ -79,10 +79,10 @@ class ThreadModel(object):
         nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
       W_softmax = weight_variable('W_softmax', [nn_output_size, output_size])
-      b_softmax = bias_variable('b_softmax', [output_size], 0.0)
+      b_softmax = bias_variable('b_softmax', [output_size], 0.001)
 
       W_linear = weight_variable('W_linear', [nn_output_size, 1])
-      b_linear = bias_variable('b_linear', [1], 0.0)
+      b_linear = bias_variable('b_linear', [1], 0.001)
 
     # Variable collections for update computations
     self.trainable_variables = tf.get_collection(
