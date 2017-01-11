@@ -147,12 +147,13 @@ class ThreadModel(object):
           _activation_summary(h_conv1, (20,20,16), 'conv1 activation')
           _input_summary(self.ob, (5,84,84,4), 'inputs')
 
-          tf.summary.scalar('value_loss', tf.reduce_mean(value_loss))
-          tf.summary.scalar('policy_loss', tf.reduce_mean(policy_loss))
-          tf.summary.scalar('total_loss', tf.reduce_mean(total_loss))
+          tf.summary.scalar('value_loss', tf.reduce_sum(value_loss))
+          tf.summary.scalar('policy_loss', tf.reduce_sum(policy_loss))
+          tf.summary.scalar('total_loss', tf.reduce_sum(total_loss))
           tf.summary.scalar('max_prob', tf.reduce_max(self.pol_prob))
-          tf.summary.scalar('td_error', tf.reduce_mean(td_error))
+          tf.summary.scalar('td_error', tf.reduce_sum(td_error))
           tf.summary.scalar('learning_rate', global_network.lr)
+          tf.summary.scalar('entropy', tf.reduce_sum(entropy))
 
           for grad in self.grads:
             summary_name = 'grad_' + '/'.join(grad.name.split('/')[-3:])
