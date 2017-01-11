@@ -128,6 +128,10 @@ class ThreadModel(object):
           global_network.lr,
           decay=rms_decay)
 
+        self.copy_to_local = self.get_global_to_local_updates(
+          global_network.trainable_variables,
+          self.trainable_variables)
+
         lr_update = tf.cond(tf.greater(global_network.lr,
           global_network.min_lr),
           lambda: global_network.lr.assign(
@@ -185,12 +189,13 @@ class ThreadModel(object):
 
       updates += [gradient_update, local_to_global, msq_update]
 
-    # control dependencies make sure local to global updates are completed
-    # before global to local updates.
-    with tf.control_dependencies(updates):
-      for Wg, Wl in zip(global_vars, local_vars):
-        global_to_local = Wl.assign(Wg)
-        updates += [global_to_local]
+    return updates
+
+  def get_global_to_local_updates(self, global_vars, local_vars):
+    updates = []
+    for Wg, Wl in zip(global_vars, local_vars):
+      global_to_local = Wl.assign(Wg)
+      updates += [global_to_local]
 
     return updates
 
@@ -296,6 +301,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
     summary_writer = tf.summary.FileWriter('train', session.graph)
 
   # Training loop
+  session.run(model.copy_to_local)
   t = 0
   done = True
   for iteration in range(config['n_iter']):
@@ -366,6 +372,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       acts[:] = 0
       rews[:] = 0
       t = 0
+      session.run(model.copy_to_local)
 
 class ACAgent(object):
   def __init__(self, **usercfg):
