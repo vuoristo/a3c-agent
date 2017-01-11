@@ -276,6 +276,29 @@ def new_random_game(env, random_starts, action_size):
     ob, _, _, _ = env.step(np.random.randint(action_size))
   return ob
 
+def save_observation(obs, ob, iteration, obs_mem_size, ob_shape, crop_centering):
+  obs_current_index = iteration % obs_mem_size
+  ob = resize_observation(ob, ob_shape, crop_centering)
+  obs[obs_current_index] = ob
+
+def get_obs_window(obs, iteration, obs_mem_size, window_size):
+  obs_current_index = iteration % obs_mem_size
+  obs_start_index = obs_current_index - window_size
+  obs_window_indices = np.arange(obs_start_index, obs_current_index) + 1
+  ob_w = obs[obs_window_indices]
+  ob_w = np.transpose(ob_w, (3,1,2,0))
+  return ob_w
+
+def get_training_window(obs, iteration, obs_mem_size, t, window_size):
+  obs_current_index = iteration % obs_mem_size
+  obs_start_index = obs_current_index - t
+  obs_indices = [np.arange(i - window_size + 1, i + 1) for i in
+    np.arange(obs_start_index, obs_current_index + 1)]
+  obs_indices = np.reshape(obs_indices, (t + 1, window_size)) % obs_mem_size
+  obs_arr = obs[obs_indices]
+  obs_arr = np.transpose(np.reshape(obs_arr, (t + 1, window_size, 84, 84)), (0,2,3,1))
+  return obs_arr
+
 def learning_thread(thread_id, config, session, model, global_model, env):
   t_max = config['t_max']
   use_rnn = config['use_rnn']
@@ -283,10 +306,13 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   window_size = config['window_size']
   gamma = config['gamma']
   random_starts = config['random_starts']
+  num_of_iterations = config['n_iter']
 
   ob_shape = (84,84,1)
   crop_centering = (0.5, 0.7)
-  obs = np.zeros((t_max + window_size, *ob_shape))
+
+  obs_mem_size = t_max + window_size
+  obs = np.zeros((obs_mem_size, *ob_shape))
   acts = np.zeros((t_max))
   rews = np.zeros((t_max))
 
@@ -303,58 +329,37 @@ def learning_thread(thread_id, config, session, model, global_model, env):
 
   # Training loop
   session.run(model.copy_to_local)
-  t = 0
-  done = True
-  for iteration in range(config['n_iter']):
-    if done:
-      done = False
-      ob = new_random_game(env, random_starts, env.action_space.n)
-      ob = resize_observation(ob, ob_shape, crop_centering)
-      obs[:] = ob
+  t_start = 0
+  done = False
+  ob = new_random_game(env, random_starts, env.action_space.n)
+  obs[:] = resize_observation(ob, ob_shape, crop_centering)
 
-      if use_rnn:
-        running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
+  if use_rnn:
+    running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
 
-      rews_acc.append(ep_rews)
-      ep_count += 1
-      print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
-            '{:.1f}'.format(thread_id, ep_count, ep_rews,
-            np.mean(rews_acc)))
-      ep_rews = 0
-    else:
-      obs_current_index = iteration % (t_max + window_size)
-      obs[obs_current_index] = ob
+  for iteration in range(num_of_iterations):
+    save_observation(obs, ob, iteration, obs_mem_size, ob_shape, crop_centering)
+    observation_window = get_obs_window(obs, iteration, obs_mem_size, window_size)
+    action = act(observation_window, model, session, use_rnn)
+    ob, rew, done, _ = env.step(action)
 
-      obs_start_index = obs_current_index - window_size
-      obs_window_indices = np.arange(obs_start_index, obs_current_index)
-      ob_w = obs[obs_window_indices]
-      ob_w = np.transpose(ob_w, (3,1,2,0))
+    t = iteration - t_start
+    acts[t] = action
+    rews[t] = rew if not done else 0
+    ep_rews += rew
 
-      action = act(ob_w, model, session, use_rnn)
-
-      ob, rew, done, _ = env.step(action)
-      ob = resize_observation(ob, ob_shape, crop_centering)
-      acts[t] = action
-      rews[t] = rew if not done else 0
-      t += 1
-      ep_rews += rew
-
-    if done or t == t_max:
-      obs_current_index = iteration % (t_max + window_size)
-      obs_start_index = obs_current_index - t
-      obs_indices = [np.arange(i - window_size + 1, i + 1) for i in np.arange(obs_start_index, obs_current_index)]
-      obs_indices = np.reshape(obs_indices, (t, window_size)) % (t_max + window_size)
-      obs_arr = obs[obs_indices]
-      obs_arr = np.transpose(np.reshape(obs_arr, (t,window_size,84,84)), (0,2,3,1))
-
-      acts_arr = np.reshape(acts[:t], (t, 1))
+    if done or iteration - t_start == t_max - 1:
+      obs_arr = get_training_window(obs, iteration, obs_mem_size, t,
+        window_size)
+      acts_arr = np.reshape(acts[:t + 1], (t + 1, 1))
 
       if done:
         R = 0
       else:
-        R = bootstrap_return(session, model, ob_w, running_rnn_state)
+        R = bootstrap_return(session, model, observation_window,
+          running_rnn_state)
 
-      R_arr = discounted_returns(rews, gamma, R, t)
+      R_arr = discounted_returns(rews, gamma, R, t + 1)
 
       training_rnn_state = run_updates(session, model, obs_arr, acts_arr,
         R_arr, training_rnn_state)
@@ -366,14 +371,30 @@ def learning_thread(thread_id, config, session, model, global_model, env):
            model.rew:R_arr})
         summary_writer.add_summary(summary_str, iteration)
 
-      if thread_id == 0 and ep_count % 300 == 0:
+      if thread_id == 0 and iteration % 10000 == 0:
         global_model.saver.save(session, 'train/model.ckpt',
           global_step=iteration)
 
       acts[:] = 0
       rews[:] = 0
-      t = 0
+      t_start = iteration + 1
       session.run(model.copy_to_local)
+
+    if done:
+      done = False
+      ob = new_random_game(env, random_starts, env.action_space.n)
+      obs[:] = resize_observation(ob, ob_shape, crop_centering)
+
+      if use_rnn:
+        running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
+
+      rews_acc.append(ep_rews)
+      ep_count += 1
+      if thread_id == 0:
+        print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
+              '{:.1f}'.format(thread_id, ep_count, ep_rews,
+              np.mean(rews_acc)))
+      ep_rews = 0
 
 class ACAgent(object):
   def __init__(self, **usercfg):
