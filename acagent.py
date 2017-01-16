@@ -8,12 +8,14 @@ from PIL import Image, ImageOps
 from util import _kernel_img_summary, _activation_summary, _input_summary
 
 def weight_variable_conv(name, shape):
-  return tf.get_variable(name,
-    shape=shape, initializer=tf.contrib.layers.xavier_initializer_conv2d())
+  return tf.get_variable(name, shape=shape,
+    initializer=tf.contrib.layers.variance_scaling_initializer(mode='FAN_IN',
+                                                               factor=1.0))
 
 def weight_variable(name, shape):
-  return tf.get_variable(name,
-    shape=shape, initializer=tf.contrib.layers.xavier_initializer())
+  return tf.get_variable(name, shape=shape,
+    initializer=tf.contrib.layers.variance_scaling_initializer(mode='FAN_AVG',
+                                                               factor=1.0))
 
 def bias_variable(name, shape, value):
   return tf.get_variable(name,
