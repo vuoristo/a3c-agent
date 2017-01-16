@@ -171,7 +171,7 @@ class ThreadModel(object):
           self.summary_op = tf.summary.merge_all()
 
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq, lr,
-                      decay=0.99, epsilon=1e-20):
+                      decay=0.99, epsilon=0.1):
     """
     Compute shared RMSProp updates for local_vars.
     global_vars - stores the global variables shared by all threads
