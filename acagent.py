@@ -418,6 +418,7 @@ class ACAgent(object):
         entropy_beta = 0.01,
         rms_decay = 0.99,
         random_starts=30,
+        load_path=None,
       )
 
     self.config.update(usercfg)
@@ -442,6 +443,8 @@ class ACAgent(object):
 
     self.session = tf.Session()
     self.session.run(tf.global_variables_initializer())
+    if self.config['load_path'] is not None:
+      self.global_model.saver.restore(self.session, self.config['load_path'])
 
   def learn(self):
     threads = []
