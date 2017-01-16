@@ -100,21 +100,22 @@ class ThreadModel(object):
       self.min_lr = tf.get_variable('min_lr', initializer=tf.constant(initial_min_lr))
     else:
       with tf.name_scope('outputs'):
-        self.pol_prob = tf.nn.softmax(tf.nn.bias_add(tf.matmul(
-          nn_outputs, W_softmax), b_softmax))
+        logits = tf.nn.bias_add(tf.matmul(nn_outputs, W_softmax), b_softmax)
+        self.pol_prob = tf.nn.softmax(logits)
+        log_prob = tf.nn.log_softmax(logits)
         self.val = tf.nn.bias_add(tf.matmul(nn_outputs, W_linear),
           b_linear)
 
       with tf.name_scope('targets'):
         actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
           (-1, output_size))
-        log_prob = tf.log(tf.clip_by_value(self.pol_prob, 1.e-22, 1.0))
         masked_log_prob = tf.reduce_sum(actions_one_hot * log_prob,
           reduction_indices=1, keep_dims=True)
-        entropy = -tf.reduce_sum(log_prob * self.pol_prob, reduction_indices=1) * entropy_beta
-        td_error = self.rew - tf.stop_gradient(self.val)
-        policy_loss = -(masked_log_prob * td_error + entropy)
-        value_loss = 0.5 * (self.rew - self.val) ** 2.
+        entropy = -tf.reduce_sum(log_prob * self.pol_prob, reduction_indices=1,
+          keep_dims=True) * entropy_beta
+        td_error_no_grad = self.rew - tf.stop_gradient(self.val)
+        policy_loss = -(masked_log_prob * td_error_no_grad + entropy)
+        value_loss = 0.5 * (self.rew - self.val) ** 2
         total_loss = tf.reduce_sum(policy_loss + 0.5 * value_loss)
 
       with tf.name_scope('gradients'):
@@ -151,7 +152,7 @@ class ThreadModel(object):
           tf.summary.scalar('policy_loss', tf.reduce_sum(policy_loss))
           tf.summary.scalar('total_loss', tf.reduce_sum(total_loss))
           tf.summary.scalar('max_prob', tf.reduce_max(self.pol_prob))
-          tf.summary.scalar('td_error', tf.reduce_sum(td_error))
+          tf.summary.scalar('td_error', tf.reduce_sum(td_error_no_grad))
           tf.summary.scalar('learning_rate', global_network.lr)
           tf.summary.scalar('entropy', tf.reduce_sum(entropy))
 
