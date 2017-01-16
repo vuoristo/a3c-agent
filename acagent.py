@@ -331,17 +331,19 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   if thread_id == 0:
     summary_writer = tf.summary.FileWriter('train', session.graph)
 
-  # Training loop
-  session.run(model.copy_to_local)
+  if use_rnn:
+    running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
+
   t_start = 0
   done = False
   ob = new_random_game(env, random_starts, env.action_space.n)
   obs[:] = resize_observation(ob, ob_shape, crop_centering)
 
-  if use_rnn:
-    running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
-
+  # Training loop
   for iteration in range(num_of_iterations):
+    if t_start == iteration:
+      session.run(model.copy_to_local)
+
     save_observation(obs, ob, iteration, obs_mem_size, ob_shape, crop_centering)
     observation_window = get_obs_window(obs, iteration, obs_mem_size, window_size)
     action = act(observation_window, model, session, use_rnn)
@@ -382,7 +384,6 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       acts[:] = 0
       rews[:] = 0
       t_start = iteration + 1
-      session.run(model.copy_to_local)
 
     if done:
       done = False
