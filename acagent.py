@@ -266,6 +266,24 @@ def reset_rnn_state(rnn_size):
     np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
   return running_rnn_state, training_rnn_state
 
+def write_summaries(summary_writer, session, model, obs_arr, acts_arr, R_arr,
+                    iteration, training_rnn_state):
+  if training_rnn_state is not None:
+    summary_str = session.run(model.summary_op,
+      {model.ob:obs_arr,
+       model.ac:acts_arr,
+       model.rew:R_arr,
+       model.rnn_state_initial_c:training_rnn_state[0],
+       model.rnn_state_initial_h:training_rnn_state[1],
+      })
+  else:
+    summary_str = session.run(model.summary_op,
+      {model.ob:obs_arr,
+       model.ac:acts_arr,
+       model.rew:R_arr,
+      })
+  summary_writer.add_summary(summary_str, iteration)
+
 def discounted_returns(rews, gamma, R, t):
   R_arr = np.zeros((t, 1))
   for i in reversed(range(t)):
@@ -371,11 +389,8 @@ def learning_thread(thread_id, config, session, model, global_model, env):
         R_arr, training_rnn_state)
 
       if thread_id == 0 and iteration % 100 == 0:
-        summary_str = session.run(model.summary_op,
-          {model.ob:obs_arr,
-           model.ac:acts_arr,
-           model.rew:R_arr})
-        summary_writer.add_summary(summary_str, iteration)
+        write_summaries(summary_writer, session, model, obs_arr, acts_arr,
+          R_arr, iteration, training_rnn_state)
 
       if thread_id == 0 and iteration % 10000 == 0:
         global_model.saver.save(session, 'train/model.ckpt',
