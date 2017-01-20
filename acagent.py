@@ -66,17 +66,18 @@ class ThreadModel(object):
       nn_output_size = 256
 
       if use_rnn:
-        lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
+        with tf.variable_scope('rnn') as rnn_scope:
+          lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(rnn_size)
 
-        self.rnn_state_initial_c = tf.placeholder(tf.float32, (1, rnn_size))
-        self.rnn_state_initial_h = tf.placeholder(tf.float32, (1, rnn_size))
-        self.rnn_state_initial = tf.nn.rnn_cell.LSTMStateTuple(
-          self.rnn_state_initial_c, self.rnn_state_initial_h)
+          self.rnn_state_initial_c = tf.placeholder(tf.float32, (1, rnn_size))
+          self.rnn_state_initial_h = tf.placeholder(tf.float32, (1, rnn_size))
+          self.rnn_state_initial = tf.nn.rnn_cell.LSTMStateTuple(
+            self.rnn_state_initial_c, self.rnn_state_initial_h)
 
-        time_windows = tf.reshape(nn_outputs, (1, -1, nn_output_size))
-        rnn_outputs, self.rnn_state_after = tf.nn.dynamic_rnn(
-          lstm_cell, time_windows, initial_state=self.rnn_state_initial,
-          dtype=tf.float32)
+          time_windows = tf.reshape(nn_outputs, (1, -1, nn_output_size))
+          rnn_outputs, self.rnn_state_after = tf.nn.dynamic_rnn(
+            lstm_cell, time_windows, initial_state=self.rnn_state_initial,
+            dtype=tf.float32, time_major=False, scope=rnn_scope)
         nn_output_size = rnn_size
         nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
@@ -215,8 +216,8 @@ def categorical_sample(prob):
   csprob = np.cumsum(prob)
   return (csprob > np.random.rand()).argmax()
 
-def act(ob, model, session, use_rnn):
-  if use_rnn:
+def act(ob, model, session, running_rnn_state):
+  if running_rnn_state is not None:
     prob, running_rnn_state = session.run(
       [model.pol_prob, model.rnn_state_after],
       {model.ob:ob,
@@ -226,7 +227,7 @@ def act(ob, model, session, use_rnn):
   else:
     prob = session.run(model.pol_prob, {model.ob:ob})
   action = categorical_sample(prob)
-  return action
+  return action, running_rnn_state
 
 def bootstrap_return(session, model, observation, running_rnn_state):
   if running_rnn_state is not None:
@@ -364,7 +365,8 @@ def learning_thread(thread_id, config, session, model, global_model, env):
 
     save_observation(obs, ob, iteration, obs_mem_size, ob_shape, crop_centering)
     observation_window = get_obs_window(obs, iteration, obs_mem_size, window_size)
-    action = act(observation_window, model, session, use_rnn)
+    action, running_rnn_state = act(observation_window, model, session,
+      running_rnn_state)
     ob, rew, done, _ = env.step(action)
 
     t = iteration - t_start
