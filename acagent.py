@@ -9,8 +9,8 @@ from util import _kernel_img_summary, _activation_summary, _input_summary
 
 def weight_variable_conv(name, shape):
   return tf.get_variable(name, shape=shape,
-    initializer=tf.contrib.layers.variance_scaling_initializer(mode='FAN_IN',
-                                                               factor=1.0))
+    initializer=tf.contrib.layers.variance_scaling_initializer(mode='FAN_AVG',
+                                                               factor=2.0))
 
 def weight_variable(name, shape):
   return tf.get_variable(name, shape=shape,
@@ -42,14 +42,14 @@ class ThreadModel(object):
     with tf.variable_scope('policy_value_network') as thread_scope:
       with tf.variable_scope('conv1'):
         W_conv1 = weight_variable_conv('W', [8,8,input_shape[2],16])
-        b_conv1 = bias_variable('b', [16], 0.001)
+        b_conv1 = bias_variable('b', [16], 0.0)
 
         h_conv1 = tf.nn.relu(conv2d(self.ob, W_conv1, [1,4,4,1]) +
           b_conv1, name='h')
 
       with tf.variable_scope('conv2'):
         W_conv2 = weight_variable_conv('W', [4,4,16,32])
-        b_conv2 = bias_variable('b', [32], 0.001)
+        b_conv2 = bias_variable('b', [32], 0.0)
 
         h_conv2 = tf.nn.relu(conv2d(h_conv1, W_conv2, [1,2,2,1]) +
           b_conv2, name='h')
@@ -57,7 +57,7 @@ class ThreadModel(object):
       with tf.variable_scope('fc1'):
         conv2_out_size = 2592
         W_fc1 = weight_variable('W', [conv2_out_size, 256])
-        b_fc1 = bias_variable('b', [256], 0.001)
+        b_fc1 = bias_variable('b', [256], 0.0)
 
         h_conv2_flat = tf.reshape(h_conv2, [-1, conv2_out_size])
         h_fc1 = tf.nn.relu(tf.matmul(h_conv2_flat, W_fc1) + b_fc1, name='h')
@@ -82,10 +82,10 @@ class ThreadModel(object):
         nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
       W_softmax = weight_variable('W_softmax', [nn_output_size, output_size])
-      b_softmax = bias_variable('b_softmax', [output_size], 0.001)
+      b_softmax = bias_variable('b_softmax', [output_size], 0.0)
 
       W_linear = weight_variable('W_linear', [nn_output_size, 1])
-      b_linear = bias_variable('b_linear', [1], 0.001)
+      b_linear = bias_variable('b_linear', [1], 0.0)
 
     # Variable collections for update computations
     self.trainable_variables = tf.get_collection(
@@ -149,7 +149,6 @@ class ThreadModel(object):
         with tf.variable_scope('summaries'):
           _kernel_img_summary(W_conv1, [8,8,1,16], 'conv1 kernels')
           _activation_summary(h_conv1, (20,20,16), 'conv1 activation')
-          _input_summary(self.ob, (5,84,84,4), 'inputs')
 
           tf.summary.scalar('value_loss', tf.reduce_sum(value_loss))
           tf.summary.scalar('policy_loss', tf.reduce_sum(policy_loss))
@@ -174,7 +173,7 @@ class ThreadModel(object):
           self.summary_op = tf.summary.merge_all()
 
   def get_rms_updates(self, global_vars, local_vars, grads, grad_msq, lr,
-                      decay=0.99, epsilon=0.1):
+                      decay=0.99, epsilon=0.01):
     """
     Compute shared RMSProp updates for local_vars.
     global_vars - stores the global variables shared by all threads
@@ -443,7 +442,9 @@ class ACAgent(object):
     self.envs = [gym.make(self.config['env_name']) for _ in
       range(self.config['num_threads'])]
 
-    self.input_shape = (84,84,4)
+    window_size = self.config['window_size']
+
+    self.input_shape = (84,84,window_size)
     self.action_num = self.envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
@@ -476,9 +477,9 @@ class ACAgent(object):
       thread.start()
 
 def main():
-  agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=1, t_max=5, lr=0.001,
-    min_lr=0.000001, lr_decay_no_steps=10000000, rnn_size=100,
-    env_name='Breakout-v0', use_rnn=False, entropy_beta=0.01, rms_decay=0.99)
+  agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=8, t_max=5, lr=0.001,
+    min_lr=0.000001, lr_decay_no_steps=10000000, rnn_size=256, window_size=1,
+    env_name='Breakout-v0', use_rnn=True, entropy_beta=0.01, rms_decay=0.99)
   agent.learn()
 
 if __name__ == "__main__":
