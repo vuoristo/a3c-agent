@@ -26,3 +26,9 @@ Description
 This project implements the Asynchronous Advantage Actor Critic reinforcement learning algorithm as described by DeepMind in their [A3C Paper](https://arxiv.org/abs/1602.01783v2). The policy network is implemented using TensorFlow and the training environments are provided by OpenAI Gym.
 
 This implementation attemtps to follow the original specification closely while utilizing the powerful TensorFlow API.
+
+TODOs
+-----
+* Cleaner thread handling. Utilize TF queues, monitors and runners.
+* Some kind of CLI.
+* Evaluate on multiple environments. Provide pretrained weights.
