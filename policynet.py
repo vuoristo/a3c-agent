@@ -24,12 +24,11 @@ class ThreadModel(object):
   """
   ThreadModel implements the policy and value networks for A3C algorithm.
   """
-  def __init__(self, input_shape, num_actions, global_network, config):
+  def __init__(self, num_actions, global_network, config):
     """
     Inits ThreadModel config and optionally global_network.
 
     Args:
-      input_shape: The shape of inputs for the conv net
       num_actions: Number of actions the policy chooses from
       global_network: None for constructing a global network. A global
         ThreadModel object for the thread models.
@@ -44,7 +43,8 @@ class ThreadModel(object):
     initial_min_lr = config['min_lr']
     lr_decay_no_steps = config['lr_decay_no_steps']
     initial_lr_decay = (initial_lr - initial_min_lr)/lr_decay_no_steps
-    num_input_frames = input_shape[2]
+    num_input_frames = config['window_size']
+    input_shape = config['ob_shape'] + (config['window_size'],)
 
     self.ob = tf.placeholder(tf.float32, (None, *input_shape), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')

@@ -208,7 +208,7 @@ def get_obs_window(obs, iteration, obs_mem_size, window_size):
   ob_w = np.transpose(ob_w, (3,1,2,0))
   return ob_w
 
-def get_training_window(obs, iteration, obs_mem_size, t, window_size):
+def get_training_window(obs, iteration, obs_mem_size, t, buffer_entry_size):
   """
   Gets training window from obs
 
@@ -217,16 +217,20 @@ def get_training_window(obs, iteration, obs_mem_size, t, window_size):
     iteration: local iteration number
     obs_mem_size: size of obs array
     t: how many timesteps to include
-    window_size: how many observations go into one window
+    buffer_entry_size: observation shape + how many obs in one window.
+      for example (84,84,1)
   """
+  window_size = buffer_entry_size[2]
   obs_current_index = iteration % obs_mem_size
   obs_start_index = obs_current_index - t
   obs_indices = [np.arange(i - window_size + 1, i + 1) for i in
     np.arange(obs_start_index, obs_current_index + 1)]
   obs_indices = np.reshape(obs_indices, (t + 1, window_size)) % obs_mem_size
   training_observations = obs[obs_indices]
-  training_observations = np.transpose(np.reshape(training_observations, (t +
-    1, window_size, 84, 84)), (0,2,3,1))
+  training_observations = np.transpose(np.reshape(
+    training_observations,
+    (t + 1, buffer_entry_size[2], buffer_entry_size[0], buffer_entry_size[1])),
+    (0,2,3,1))
   return training_observations
 
 def learning_thread(thread_id, config, session, model, global_model, env):
@@ -250,11 +254,12 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   num_of_iterations = config['n_iter']
   train_dir = config['train_dir']
 
-  ob_shape = (84,84,1)
-  crop_centering = (0.5, 0.7)
+  ob_shape = config['ob_shape']
+  buffer_entry_size = ob_shape + (window_size,)
+  crop_centering = config['crop_centering']
 
   obs_mem_size = t_max + window_size
-  observation_buffer = np.zeros((obs_mem_size, *ob_shape))
+  observation_buffer = np.zeros((obs_mem_size, *buffer_entry_size))
   acts = np.zeros((t_max))
   rews = np.zeros((t_max))
 
@@ -275,15 +280,16 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   t_start = 0
   done = False
   ob = new_random_game(env, random_starts, env.action_space.n)
-  observation_buffer[:] = resize_observation(ob, ob_shape, crop_centering)
+  observation_buffer[:] = resize_observation(ob, buffer_entry_size,
+    crop_centering)
 
   # Training loop
   for iteration in range(num_of_iterations):
     if t_start == iteration:
       session.run(model.copy_to_local)
 
-    save_observation(observation_buffer, ob, iteration, obs_mem_size, ob_shape,
-      crop_centering)
+    save_observation(observation_buffer, ob, iteration, obs_mem_size,
+      buffer_entry_size, crop_centering)
     observation_window = get_obs_window(observation_buffer, iteration,
       obs_mem_size, window_size)
     action, running_rnn_state = act(observation_window, model, session,
@@ -297,7 +303,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
 
     if done or iteration - t_start == t_max - 1:
       training_observations = get_training_window(observation_buffer,
-        iteration, obs_mem_size, t, window_size)
+        iteration, obs_mem_size, t, buffer_entry_size)
       training_actions = np.reshape(acts[:t + 1], (t + 1, 1))
 
       if done:
@@ -325,7 +331,8 @@ def learning_thread(thread_id, config, session, model, global_model, env):
     if done:
       done = False
       ob = new_random_game(env, random_starts, env.action_space.n)
-      observation_buffer[:] = resize_observation(ob, ob_shape, crop_centering)
+      observation_buffer[:] = resize_observation(ob, buffer_entry_size,
+        crop_centering)
 
       if use_rnn:
         running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
@@ -358,6 +365,8 @@ class ACAgent(object):
         use_rnn = True,
         num_threads = 1,
         window_size = 4,
+        ob_shape=(84,84),
+        crop_centering=(0.5,0.7),
         env_name = '',
         entropy_beta = 0.01,
         rms_decay = 0.99,
@@ -372,21 +381,15 @@ class ACAgent(object):
     self.envs = [gym.make(self.config['env_name']) for _ in
       range(self.config['num_threads'])]
 
-    window_size = self.config['window_size']
-
-    self.input_shape = (84,84,window_size)
-    self.action_num = self.envs[0].action_space.n
-    self.use_rnn = self.config['use_rnn']
+    action_num = self.envs[0].action_space.n
 
     with tf.variable_scope('global'), tf.device('/cpu:0'):
-      self.global_model = ThreadModel(self.input_shape, self.action_num, None,
-        self.config)
+      self.global_model = ThreadModel(action_num, None, self.config)
 
     self.thread_models = []
     for thr in range(self.config['num_threads']):
       with tf.variable_scope('thread_{}'.format(thr)):
-        thr_model = ThreadModel(self.input_shape, self.action_num,
-          self.global_model, self.config)
+        thr_model = ThreadModel(action_num, self.global_model, self.config)
         self.thread_models.append(thr_model)
 
     self.session = tf.Session()
