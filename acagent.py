@@ -8,8 +8,9 @@ from PIL import Image, ImageOps
 from policynet import ThreadModel
 
 def resize_observation(observation, shape, centering):
+  img_shape = shape[:2]
   img = Image.fromarray(observation)
-  img = ImageOps.fit(img, shape[:2], centering=centering)
+  img = ImageOps.fit(img, img_shape, centering=centering)
   img = img.convert('L')
   return np.reshape(np.array(img), (1, *shape)) * 1./255.
 
@@ -205,10 +206,11 @@ def get_obs_window(obs, iteration, obs_mem_size, window_size):
   obs_start_index = obs_current_index - window_size
   obs_window_indices = np.arange(obs_start_index, obs_current_index) + 1
   ob_w = obs[obs_window_indices]
-  ob_w = np.transpose(ob_w, (3,1,2,0))
+  ob_w = np.transpose(ob_w, (1,2,0))[np.newaxis]
   return ob_w
 
-def get_training_window(obs, iteration, obs_mem_size, t, buffer_entry_size):
+def get_training_window(obs, iteration, obs_mem_size, t, window_size,
+    observation_shape):
   """
   Gets training window from obs
 
@@ -217,10 +219,9 @@ def get_training_window(obs, iteration, obs_mem_size, t, buffer_entry_size):
     iteration: local iteration number
     obs_mem_size: size of obs array
     t: how many timesteps to include
-    buffer_entry_size: observation shape + how many obs in one window.
-      for example (84,84,1)
+    window_size: how many observations in one window
+    observation_shape: for example (84,84)
   """
-  window_size = buffer_entry_size[2]
   obs_current_index = iteration % obs_mem_size
   obs_start_index = obs_current_index - t
   obs_indices = [np.arange(i - window_size + 1, i + 1) for i in
@@ -229,7 +230,7 @@ def get_training_window(obs, iteration, obs_mem_size, t, buffer_entry_size):
   training_observations = obs[obs_indices]
   training_observations = np.transpose(np.reshape(
     training_observations,
-    (t + 1, buffer_entry_size[2], buffer_entry_size[0], buffer_entry_size[1])),
+    (t + 1, window_size, *observation_shape)),
     (0,2,3,1))
   return training_observations
 
@@ -254,12 +255,11 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   num_of_iterations = config['n_iter']
   train_dir = config['train_dir']
 
-  ob_shape = config['ob_shape']
-  buffer_entry_size = ob_shape + (window_size,)
+  observation_shape = config['ob_shape']
   crop_centering = config['crop_centering']
 
   obs_mem_size = t_max + window_size
-  observation_buffer = np.zeros((obs_mem_size, *buffer_entry_size))
+  observation_buffer = np.zeros((obs_mem_size, *observation_shape))
   acts = np.zeros((t_max))
   rews = np.zeros((t_max))
 
@@ -280,7 +280,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   t_start = 0
   done = False
   ob = new_random_game(env, random_starts, env.action_space.n)
-  observation_buffer[:] = resize_observation(ob, buffer_entry_size,
+  observation_buffer[:] = resize_observation(ob, observation_shape,
     crop_centering)
 
   # Training loop
@@ -289,7 +289,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       session.run(model.copy_to_local)
 
     save_observation(observation_buffer, ob, iteration, obs_mem_size,
-      buffer_entry_size, crop_centering)
+      observation_shape, crop_centering)
     observation_window = get_obs_window(observation_buffer, iteration,
       obs_mem_size, window_size)
     action, running_rnn_state = act(observation_window, model, session,
@@ -303,7 +303,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
 
     if done or iteration - t_start == t_max - 1:
       training_observations = get_training_window(observation_buffer,
-        iteration, obs_mem_size, t, buffer_entry_size)
+        iteration, obs_mem_size, t, window_size, observation_shape)
       training_actions = np.reshape(acts[:t + 1], (t + 1, 1))
 
       if done:
@@ -331,7 +331,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
     if done:
       done = False
       ob = new_random_game(env, random_starts, env.action_space.n)
-      observation_buffer[:] = resize_observation(ob, buffer_entry_size,
+      observation_buffer[:] = resize_observation(ob, observation_shape,
         crop_centering)
 
       if use_rnn:
