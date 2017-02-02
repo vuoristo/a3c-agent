@@ -273,13 +273,13 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   # save_observation, get_obs_window and get_training_window functions,
   # which handle the indexing.
   observation_buffer = np.zeros((obs_mem_size, *observation_shape))
-  acts = np.zeros((t_max))
-  rews = np.zeros((t_max))
+  actions = np.zeros((t_max))
+  rewards = np.zeros((t_max))
 
   # variables for accounting
-  ep_rews = 0
-  ep_count = 0
-  rews_acc = deque(maxlen=100)
+  episode_rewards = 0
+  episode_count = 0
+  previous_rewards = deque(maxlen=100)
 
   running_rnn_state = None
   training_rnn_state = None
@@ -310,21 +310,23 @@ def learning_thread(thread_id, config, session, model, global_model, env):
     ob, rew, done, _ = env.step(action)
 
     t = iteration - t_start
-    acts[t] = action
-    rews[t] = rew if not done else 0
-    ep_rews += rew
+    actions[t] = action
+    rewards[t] = rew if not done else 0
+    episode_rewards += rew
 
+    # Training is triggered after each episode or after t_max steps
     if done or iteration - t_start == t_max - 1:
       training_observations = get_training_window(observation_buffer,
         iteration, obs_mem_size, t, window_size, observation_shape)
-      training_actions = np.reshape(acts[:t + 1], (t + 1, 1))
+      training_actions = np.reshape(actions[:t + 1], (t + 1, 1))
 
       if done:
         final_return = 0
       else:
         final_return = bootstrap_return(observation_window, model,
           session, running_rnn_state)
-      discounted_returns = discount_returns(rews, gamma, final_return, t + 1)
+      discounted_returns = discount_returns(
+        rewards, gamma, final_return, t + 1)
 
       training_rnn_state = run_updates(session, model, training_observations,
         training_actions, discounted_returns, training_rnn_state)
@@ -337,10 +339,11 @@ def learning_thread(thread_id, config, session, model, global_model, env):
         global_model.saver.save(session, train_dir + 'model.ckpt',
           global_step=iteration)
 
-      acts[:] = 0
-      rews[:] = 0
+      actions[:] = 0
+      rewards[:] = 0
       t_start = iteration + 1
 
+    # Some management tasks are conducted after each episode
     if done:
       done = False
       ob = new_random_game(env, random_starts, env.action_space.n)
@@ -350,13 +353,13 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       if use_rnn:
         running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
 
-      rews_acc.append(ep_rews)
-      ep_count += 1
+      previous_rewards.append(episode_rewards)
+      episode_count += 1
       if thread_id == 0:
         print('Thread: {} Episode: {} Rews: {} RunningAvgRew: '
-              '{:.1f}'.format(thread_id, ep_count, ep_rews,
-              np.mean(rews_acc)))
-      ep_rews = 0
+              '{:.1f}'.format(thread_id, episode_count, episode_rewards,
+              np.mean(previous_rewards)))
+      episode_rewards = 0
 
 class ACAgent(object):
   """
