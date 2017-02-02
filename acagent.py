@@ -66,35 +66,36 @@ def bootstrap_return(observation, model, session, running_rnn_state):
     R = session.run(model.val, {model.ob:observation})
   return R
 
-def run_updates(session, model, obs_arr, acts_arr, R_arr, training_rnn_state):
+def run_updates(session, model, training_observations, training_actions,
+    discounted_returns, training_rnn_state):
   """
   Run one update step for the model.
 
   Args:
     session: TensorFlow session
     model: ThreadModel object for the current thread
-    obs_arr: an array of consecutive observations (or windows of observation)
-      from the environment
-    acts_arr: an array of actions selected
-    R_arr: an array of discounted returns
+    training_observations: an array of consecutive observations (or windows of
+      observation) from the environment
+    training_actions: an array of actions selected
+    discounted_returns: an array of discounted returns
     training_rnn_state: None for ff version of the algorithm, LSTMStateTuple
       for the LSTM version
   """
   if training_rnn_state is not None:
     _, training_rnn_state = session.run(
       [model.updates, model.rnn_state_after],
-      {model.ob:obs_arr,
-       model.ac:acts_arr,
-       model.rew:R_arr,
+      {model.ob:training_observations,
+       model.ac:training_actions,
+       model.rew:discounted_returns,
        model.rnn_state_initial_c:training_rnn_state[0],
        model.rnn_state_initial_h:training_rnn_state[1],
       })
   else:
     _ = session.run(
       [model.updates],
-      {model.ob:obs_arr,
-       model.ac:acts_arr,
-       model.rew:R_arr,
+      {model.ob:training_observations,
+       model.ac:training_actions,
+       model.rew:discounted_returns,
       })
   return training_rnn_state
 
@@ -108,8 +109,8 @@ def reset_rnn_state(rnn_size):
     np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
   return running_rnn_state, training_rnn_state
 
-def write_summaries(summary_writer, session, model, obs_arr, acts_arr, R_arr,
-                    iteration, training_rnn_state):
+def write_summaries(summary_writer, session, model, training_observations,
+    training_actions, discounted_returns, iteration, training_rnn_state):
   """
   Evaluate the model and write summaries
 
@@ -117,31 +118,31 @@ def write_summaries(summary_writer, session, model, obs_arr, acts_arr, R_arr,
     summary_writes: TensorFlow summary writer
     session: TensorFlow session
     model: ThreadModel object for the current thread
-    obs_arr: an array of consecutive observations (or windows of observation)
-      from the environment
-    acts_arr: an array of actions selected
-    R_arr: an array of discounted returns
+    training_observations: an array of consecutive observations (or windows of
+      observation) from the environment
+    training_actions: an array of actions selected
+    discounted_returns: an array of discounted returns
     iteration: number of global steps taken.
     training_rnn_state: None for ff version of the algorithm, LSTMStateTuple
       for the LSTM version
   """
   if training_rnn_state is not None:
     summary_str = session.run(model.summary_op,
-      {model.ob:obs_arr,
-       model.ac:acts_arr,
-       model.rew:R_arr,
+      {model.ob:training_observations,
+       model.ac:training_actions,
+       model.rew:discounted_returns,
        model.rnn_state_initial_c:training_rnn_state[0],
        model.rnn_state_initial_h:training_rnn_state[1],
       })
   else:
     summary_str = session.run(model.summary_op,
-      {model.ob:obs_arr,
-       model.ac:acts_arr,
-       model.rew:R_arr,
+      {model.ob:training_observations,
+       model.ac:training_actions,
+       model.rew:discounted_returns,
       })
   summary_writer.add_summary(summary_str, iteration)
 
-def discounted_returns(rews, gamma, R, t):
+def discount_returns(rews, gamma, R, t):
   """
   Compute exponential discounts on the returns
 
@@ -151,11 +152,11 @@ def discounted_returns(rews, gamma, R, t):
     R: bootstrap return
     t: number of timesteps to compute
   """
-  R_arr = np.zeros((t, 1))
+  discounted_returns = np.zeros((t, 1))
   for i in reversed(range(t)):
     R = rews[i] + gamma * R
-    R_arr[i, 0] = R
-  return R_arr
+    discounted_returns[i, 0] = R
+  return discounted_returns
 
 def new_random_game(env, random_starts, action_size):
   """
@@ -223,12 +224,23 @@ def get_training_window(obs, iteration, obs_mem_size, t, window_size):
   obs_indices = [np.arange(i - window_size + 1, i + 1) for i in
     np.arange(obs_start_index, obs_current_index + 1)]
   obs_indices = np.reshape(obs_indices, (t + 1, window_size)) % obs_mem_size
-  obs_arr = obs[obs_indices]
-  obs_arr = np.transpose(np.reshape(obs_arr, (t + 1, window_size, 84, 84)),
-    (0,2,3,1))
-  return obs_arr
+  training_observations = obs[obs_indices]
+  training_observations = np.transpose(np.reshape(training_observations, (t +
+    1, window_size, 84, 84)), (0,2,3,1))
+  return training_observations
 
 def learning_thread(thread_id, config, session, model, global_model, env):
+  """
+  Executes the training loop. Called by each of the training threads.
+
+  Args:
+    thread_id: integer from 0 to num threads
+    config: config for the training loop
+    session: TensorFlow session
+    model: The ThreadModel object for the current thread
+    global_model: The global ThreadModel object
+    env: OpenAI Gym environment specific to this thread
+  """
   t_max = config['t_max']
   use_rnn = config['use_rnn']
   rnn_size = config['rnn_size']
@@ -236,12 +248,13 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   gamma = config['gamma']
   random_starts = config['random_starts']
   num_of_iterations = config['n_iter']
+  train_dir = config['train_dir']
 
   ob_shape = (84,84,1)
   crop_centering = (0.5, 0.7)
 
   obs_mem_size = t_max + window_size
-  obs = np.zeros((obs_mem_size, *ob_shape))
+  observation_buffer = np.zeros((obs_mem_size, *ob_shape))
   acts = np.zeros((t_max))
   rews = np.zeros((t_max))
 
@@ -254,7 +267,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   training_rnn_state = None
 
   if thread_id == 0:
-    summary_writer = tf.summary.FileWriter('train', session.graph)
+    summary_writer = tf.summary.FileWriter(train_dir, session.graph)
 
   if use_rnn:
     running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
@@ -262,15 +275,17 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   t_start = 0
   done = False
   ob = new_random_game(env, random_starts, env.action_space.n)
-  obs[:] = resize_observation(ob, ob_shape, crop_centering)
+  observation_buffer[:] = resize_observation(ob, ob_shape, crop_centering)
 
   # Training loop
   for iteration in range(num_of_iterations):
     if t_start == iteration:
       session.run(model.copy_to_local)
 
-    save_observation(obs, ob, iteration, obs_mem_size, ob_shape, crop_centering)
-    observation_window = get_obs_window(obs, iteration, obs_mem_size, window_size)
+    save_observation(observation_buffer, ob, iteration, obs_mem_size, ob_shape,
+      crop_centering)
+    observation_window = get_obs_window(observation_buffer, iteration,
+      obs_mem_size, window_size)
     action, running_rnn_state = act(observation_window, model, session,
       running_rnn_state)
     ob, rew, done, _ = env.step(action)
@@ -281,27 +296,26 @@ def learning_thread(thread_id, config, session, model, global_model, env):
     ep_rews += rew
 
     if done or iteration - t_start == t_max - 1:
-      obs_arr = get_training_window(obs, iteration, obs_mem_size, t,
-        window_size)
-      acts_arr = np.reshape(acts[:t + 1], (t + 1, 1))
+      training_observations = get_training_window(observation_buffer,
+        iteration, obs_mem_size, t, window_size)
+      training_actions = np.reshape(acts[:t + 1], (t + 1, 1))
 
       if done:
-        R = 0
+        final_return = 0
       else:
-        R = bootstrap_return(observation_window, model, session,
-          running_rnn_state)
+        final_return = bootstrap_return(observation_window, model,
+          session, running_rnn_state)
+      discounted_returns = discount_returns(rews, gamma, final_return, t + 1)
 
-      R_arr = discounted_returns(rews, gamma, R, t + 1)
-
-      training_rnn_state = run_updates(session, model, obs_arr, acts_arr,
-        R_arr, training_rnn_state)
+      training_rnn_state = run_updates(session, model, training_observations,
+        training_actions, discounted_returns, training_rnn_state)
 
       if thread_id == 0 and iteration % 100 == 0:
-        write_summaries(summary_writer, session, model, obs_arr, acts_arr,
-          R_arr, iteration, training_rnn_state)
+        write_summaries(summary_writer, session, model, training_observations,
+          training_actions, discounted_returns, iteration, training_rnn_state)
 
       if thread_id == 0 and iteration % 10000 == 0:
-        global_model.saver.save(session, 'train/model.ckpt',
+        global_model.saver.save(session, train_dir + 'model.ckpt',
           global_step=iteration)
 
       acts[:] = 0
@@ -311,7 +325,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
     if done:
       done = False
       ob = new_random_game(env, random_starts, env.action_space.n)
-      obs[:] = resize_observation(ob, ob_shape, crop_centering)
+      observation_buffer[:] = resize_observation(ob, ob_shape, crop_centering)
 
       if use_rnn:
         running_rnn_state, training_rnn_state = reset_rnn_state(rnn_size)
@@ -343,6 +357,7 @@ class ACAgent(object):
         rms_epsilon = 0.01,
         random_starts=30,
         load_path=None,
+        train_dir='train',
       )
 
     self.config.update(usercfg)
