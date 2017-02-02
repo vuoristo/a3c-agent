@@ -21,23 +21,39 @@ def conv2d(x, W, strides):
   return tf.nn.conv2d(x, W, strides=strides, padding='VALID')
 
 class ThreadModel(object):
-  def __init__(self, input_shape, output_size, global_network, config):
+  """
+  ThreadModel implements the policy and value networks for A3C algorithm.
+  """
+  def __init__(self, input_shape, num_actions, global_network, config):
+    """
+    Inits ThreadModel config and optionally global_network.
+
+    Args:
+      input_shape: The shape of inputs for the conv net
+      num_actions: Number of actions the policy chooses from
+      global_network: None for constructing a global network. A global
+        ThreadModel object for the thread models.
+      config: Defines tunable hyperparameters of the network
+    """
     rnn_size = config['rnn_size']
     entropy_beta = config['entropy_beta']
     use_rnn = config['use_rnn']
     rms_decay = config['rms_decay']
+    rms_epsilon = config['rms_epsilon']
     initial_lr = config['lr']
     initial_min_lr = config['min_lr']
     lr_decay_no_steps = config['lr_decay_no_steps']
     initial_lr_decay = (initial_lr - initial_min_lr)/lr_decay_no_steps
+    num_input_frames = input_shape[2]
 
     self.ob = tf.placeholder(tf.float32, (None, *input_shape), name='ob')
     self.ac = tf.placeholder(tf.int32, (None, 1), name='ac')
     self.rew = tf.placeholder(tf.float32, (None, 1), name='rew')
 
+    # Defines the conv net and optionally the recurrent net used by the policy
     with tf.variable_scope('policy_value_network') as thread_scope:
       with tf.variable_scope('conv1'):
-        W_conv1 = weight_variable_conv('W', [8,8,input_shape[2],16])
+        W_conv1 = weight_variable_conv('W', [8,8,num_input_frames,16])
         b_conv1 = bias_variable('b', [16], 0.0)
 
         h_conv1 = tf.nn.relu(conv2d(self.ob, W_conv1, [1,4,4,1]) +
@@ -70,6 +86,7 @@ class ThreadModel(object):
           self.rnn_state_initial = tf.nn.rnn_cell.LSTMStateTuple(
             self.rnn_state_initial_c, self.rnn_state_initial_h)
 
+          # Reshapes nn_outputs to have a false batch dimension for rnns.
           time_windows = tf.reshape(nn_outputs, (1, -1, nn_output_size))
           rnn_outputs, self.rnn_state_after = tf.nn.dynamic_rnn(
             lstm_cell, time_windows, initial_state=self.rnn_state_initial,
@@ -77,13 +94,13 @@ class ThreadModel(object):
         nn_output_size = rnn_size
         nn_outputs = tf.reshape(rnn_outputs, (-1, rnn_size))
 
-      W_softmax = weight_variable('W_softmax', [nn_output_size, output_size])
-      b_softmax = bias_variable('b_softmax', [output_size], 0.0)
+      W_softmax = weight_variable('W_softmax', [nn_output_size, num_actions])
+      b_softmax = bias_variable('b_softmax', [num_actions], 0.0)
 
       W_linear = weight_variable('W_linear', [nn_output_size, 1])
       b_linear = bias_variable('b_linear', [1], 0.0)
 
-    # Variable collections for update computations
+    # Collect all trainable variables defined by this ThreadModel for updates
     self.trainable_variables = tf.get_collection(
       tf.GraphKeys.TRAINABLE_VARIABLES, scope=thread_scope.name)
 
@@ -94,11 +111,15 @@ class ThreadModel(object):
         dtype=np.float32)) for var in self.trainable_variables]
       self.saver = tf.train.Saver(tf.global_variables())
 
-      self.lr = tf.get_variable('lr_decay', initializer=tf.constant(initial_lr))
-      self.lr_decay = tf.get_variable('lr', initializer=tf.constant(initial_lr_decay))
-      self.min_lr = tf.get_variable('min_lr', initializer=tf.constant(initial_min_lr))
+      self.lr = tf.get_variable(
+        'lr_decay', initializer=tf.constant(initial_lr))
+      self.lr_decay = tf.get_variable(
+        'lr', initializer=tf.constant(initial_lr_decay))
+      self.min_lr = tf.get_variable(
+        'min_lr', initializer=tf.constant(initial_min_lr))
     else:
       with tf.name_scope('outputs'):
+        # The softmax output of policy and the linear output of value network
         logits = tf.nn.bias_add(tf.matmul(nn_outputs, W_softmax), b_softmax)
         self.pol_prob = tf.nn.softmax(logits)
         log_prob = tf.nn.log_softmax(logits)
@@ -106,12 +127,13 @@ class ThreadModel(object):
           b_linear)
 
       with tf.name_scope('targets'):
-        actions_one_hot = tf.reshape(tf.one_hot(self.ac, output_size),
-          (-1, output_size))
+        actions_one_hot = tf.reshape(tf.one_hot(self.ac, num_actions),
+          (-1, num_actions))
         masked_log_prob = tf.reduce_sum(actions_one_hot * log_prob,
           reduction_indices=1, keep_dims=True)
         entropy = -tf.reduce_sum(log_prob * self.pol_prob, reduction_indices=1,
           keep_dims=True) * entropy_beta
+        # Gradients should not pass the value node from the policy loss
         td_error_no_grad = self.rew - tf.stop_gradient(self.val)
         policy_loss = -(masked_log_prob * td_error_no_grad + entropy)
         value_loss = 0.5 * (self.rew - self.val) ** 2
@@ -127,7 +149,8 @@ class ThreadModel(object):
           self.grads,
           global_network.gradient_mean_square,
           global_network.lr,
-          decay=rms_decay)
+          decay=rms_decay,
+          epsilon=rms_epsilon)
 
         self.copy_to_local = self.get_global_to_local_updates(
           global_network.trainable_variables,
@@ -172,17 +195,18 @@ class ThreadModel(object):
                       decay=0.99, epsilon=0.01):
     """
     Compute shared RMSProp updates for local_vars.
-    global_vars - stores the global variables shared by all threads
-    local_vars - thread local variables that are used for gradient computation
-    grads - gradients of local_vars
-    grad_msq - globally stored mean of squared gradients
-    decay - the momentum parameter
-    epsilon - for numerical stability
+
+    Args:
+      global_vars: stores the global variables shared by all threads
+      local_vars: thread local variables that are used for gradient computation
+      grads: gradients of local_vars
+      grad_msq: globally stored mean of squared gradients
+      decay: the momentum parameter
+      epsilon: for numerical stability
     """
     updates = []
     for Wg, grad, msq in zip(global_vars, grads, grad_msq):
       msq_update = msq.assign(decay * msq + (1. - decay) * tf.pow(grad, 2))
-
       # control dependecies make sure msq is updated before gradients
       with tf.control_dependencies([msq_update]):
         gradient_update = -lr * grad / tf.sqrt(msq + epsilon)
@@ -193,6 +217,9 @@ class ThreadModel(object):
     return updates
 
   def get_global_to_local_updates(self, global_vars, local_vars):
+    """
+    Defines ops to copy global variables to local variables
+    """
     updates = []
     for Wg, Wl in zip(global_vars, local_vars):
       global_to_local = Wl.assign(Wg)

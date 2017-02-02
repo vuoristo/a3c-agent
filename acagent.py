@@ -236,6 +236,7 @@ class ACAgent(object):
         env_name = '',
         entropy_beta = 0.01,
         rms_decay = 0.99,
+        rms_epsilon = 0.01,
         random_starts=30,
         load_path=None,
       )
