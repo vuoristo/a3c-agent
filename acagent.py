@@ -14,24 +14,47 @@ def resize_observation(observation, shape, centering):
   return np.reshape(np.array(img), (1, *shape)) * 1./255.
 
 def categorical_sample(prob):
+  """
+  Sample from a categorical distribution specified by a vector of probabilities
+  """
   prob = np.asarray(prob)
   csprob = np.cumsum(prob)
   return (csprob > np.random.rand()).argmax()
 
-def act(ob, model, session, running_rnn_state):
+def act(observation, model, session, running_rnn_state):
+  """
+  Given an observation and a model return an action sampled from the policy.
+
+  Args:
+    observation: observation or a stack of observations from the environment
+    model: ThreadModel object for the current thread
+    session: TensorFlow session
+    running_rnn_state: None for ff version of the algorithm, LSTMStateTuple for
+      the LSTM version
+  """
   if running_rnn_state is not None:
     prob, running_rnn_state = session.run(
       [model.pol_prob, model.rnn_state_after],
-      {model.ob:ob,
+      {model.ob:observation,
        model.rnn_state_initial_c:running_rnn_state[0],
        model.rnn_state_initial_h:running_rnn_state[1],
       })
   else:
-    prob = session.run(model.pol_prob, {model.ob:ob})
+    prob = session.run(model.pol_prob, {model.ob:observation})
   action = categorical_sample(prob)
   return action, running_rnn_state
 
-def bootstrap_return(session, model, observation, running_rnn_state):
+def bootstrap_return(observation, model, session, running_rnn_state):
+  """
+  Given an observation and a model return the value evaluated at observation.
+
+  Args:
+    observation: observation or a stack of observations from the environment
+    model: ThreadModel object for the current thread
+    session: TensorFlow session
+    running_rnn_state: None for ff version of the algorithm, LSTMStateTuple for
+      the LSTM version
+  """
   if running_rnn_state is not None:
     R = session.run(
       model.val,
@@ -44,6 +67,19 @@ def bootstrap_return(session, model, observation, running_rnn_state):
   return R
 
 def run_updates(session, model, obs_arr, acts_arr, R_arr, training_rnn_state):
+  """
+  Run one update step for the model.
+
+  Args:
+    session: TensorFlow session
+    model: ThreadModel object for the current thread
+    obs_arr: an array of consecutive observations (or windows of observation)
+      from the environment
+    acts_arr: an array of actions selected
+    R_arr: an array of discounted returns
+    training_rnn_state: None for ff version of the algorithm, LSTMStateTuple
+      for the LSTM version
+  """
   if training_rnn_state is not None:
     _, training_rnn_state = session.run(
       [model.updates, model.rnn_state_after],
@@ -63,6 +99,9 @@ def run_updates(session, model, obs_arr, acts_arr, R_arr, training_rnn_state):
   return training_rnn_state
 
 def reset_rnn_state(rnn_size):
+  """
+  Returns an all-zeros LSTMStateTuple for the given rnn_size
+  """
   running_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
     np.zeros([1, rnn_size]), np.zeros([1, rnn_size]))
   training_rnn_state = tf.nn.rnn_cell.LSTMStateTuple(
@@ -71,6 +110,21 @@ def reset_rnn_state(rnn_size):
 
 def write_summaries(summary_writer, session, model, obs_arr, acts_arr, R_arr,
                     iteration, training_rnn_state):
+  """
+  Evaluate the model and write summaries
+
+  Args:
+    summary_writes: TensorFlow summary writer
+    session: TensorFlow session
+    model: ThreadModel object for the current thread
+    obs_arr: an array of consecutive observations (or windows of observation)
+      from the environment
+    acts_arr: an array of actions selected
+    R_arr: an array of discounted returns
+    iteration: number of global steps taken.
+    training_rnn_state: None for ff version of the algorithm, LSTMStateTuple
+      for the LSTM version
+  """
   if training_rnn_state is not None:
     summary_str = session.run(model.summary_op,
       {model.ob:obs_arr,
@@ -88,6 +142,15 @@ def write_summaries(summary_writer, session, model, obs_arr, acts_arr, R_arr,
   summary_writer.add_summary(summary_str, iteration)
 
 def discounted_returns(rews, gamma, R, t):
+  """
+  Compute exponential discounts on the returns
+
+  Args:
+    rews: an array of rewards from the environment
+    gamma: the discounting factor
+    R: bootstrap return
+    t: number of timesteps to compute
+  """
   R_arr = np.zeros((t, 1))
   for i in reversed(range(t)):
     R = rews[i] + gamma * R
@@ -95,18 +158,48 @@ def discounted_returns(rews, gamma, R, t):
   return R_arr
 
 def new_random_game(env, random_starts, action_size):
+  """
+  Step the environment for a random number of steps
+
+  Args:
+    env: OpenAI Gym environment
+    random_starts: maximum number of random steps to take
+    action_size: number of actions available
+  """
   ob = env.reset()
   no_rnd = np.random.randint(0, random_starts)
   for i in range(no_rnd):
     ob, _, _, _ = env.step(np.random.randint(action_size))
   return ob
 
-def save_observation(obs, ob, iteration, obs_mem_size, ob_shape, crop_centering):
+def save_observation(obs, ob, iteration, obs_mem_size, ob_shape,
+                     crop_centering):
+  """
+  Saves an observation from the environment into the array obs
+
+  Args:
+    obs: a numpy ndarray for storing observations
+    ob: the current observation
+    iteration: local iteration number
+    obs_mem_size: size of obs array
+    ob_shape: the observation shape used by the model
+    crop_centering: a tuple defining the horizontal and vertical centering of
+      the crop for the observations
+  """
   obs_current_index = iteration % obs_mem_size
   ob = resize_observation(ob, ob_shape, crop_centering)
   obs[obs_current_index] = ob
 
 def get_obs_window(obs, iteration, obs_mem_size, window_size):
+  """
+  Gets the current observation window from obs
+
+  Args:
+    obs: a numpy ndarray for storing observations
+    iteration: local iteration number
+    obs_mem_size: size of obs array
+    window_size: how many observations go into one window
+  """
   obs_current_index = iteration % obs_mem_size
   obs_start_index = obs_current_index - window_size
   obs_window_indices = np.arange(obs_start_index, obs_current_index) + 1
@@ -115,13 +208,24 @@ def get_obs_window(obs, iteration, obs_mem_size, window_size):
   return ob_w
 
 def get_training_window(obs, iteration, obs_mem_size, t, window_size):
+  """
+  Gets training window from obs
+
+  Args:
+    obs: a numpy ndarray for storing observations
+    iteration: local iteration number
+    obs_mem_size: size of obs array
+    t: how many timesteps to include
+    window_size: how many observations go into one window
+  """
   obs_current_index = iteration % obs_mem_size
   obs_start_index = obs_current_index - t
   obs_indices = [np.arange(i - window_size + 1, i + 1) for i in
     np.arange(obs_start_index, obs_current_index + 1)]
   obs_indices = np.reshape(obs_indices, (t + 1, window_size)) % obs_mem_size
   obs_arr = obs[obs_indices]
-  obs_arr = np.transpose(np.reshape(obs_arr, (t + 1, window_size, 84, 84)), (0,2,3,1))
+  obs_arr = np.transpose(np.reshape(obs_arr, (t + 1, window_size, 84, 84)),
+    (0,2,3,1))
   return obs_arr
 
 def learning_thread(thread_id, config, session, model, global_model, env):
@@ -184,7 +288,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       if done:
         R = 0
       else:
-        R = bootstrap_return(session, model, observation_window,
+        R = bootstrap_return(observation_window, model, session,
           running_rnn_state)
 
       R_arr = discounted_returns(rews, gamma, R, t + 1)
