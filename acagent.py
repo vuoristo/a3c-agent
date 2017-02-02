@@ -8,6 +8,15 @@ from PIL import Image, ImageOps
 from policynet import ThreadModel
 
 def resize_observation(observation, shape, centering):
+  """
+  Resizes the observation from the environment. Normalizes values to (0,1)
+
+  Args:
+    observation: single observation from the environment
+    shape: input shape for the network. for example (84,84)
+    centering: the input is cropped into square. centering defines the crop
+      ratio. for example (0.5, 0.7)
+  """
   img_shape = shape[:2]
   img = Image.fromarray(observation)
   img = ImageOps.fit(img, img_shape, centering=centering)
@@ -180,10 +189,10 @@ def save_observation(obs, ob, iteration, obs_mem_size, ob_shape,
   Saves an observation from the environment into the array obs
 
   Args:
-    obs: a numpy ndarray for storing observations
+    obs: a circular buffer stored as numpy ndarray for storing observations
     ob: the current observation
-    iteration: local iteration number
-    obs_mem_size: size of obs array
+    iteration: local iteration number, used for accessing the buffer
+    obs_mem_size: size of obs array, used for accessing the buffer
     ob_shape: the observation shape used by the model
     crop_centering: a tuple defining the horizontal and vertical centering of
       the crop for the observations
@@ -197,9 +206,9 @@ def get_obs_window(obs, iteration, obs_mem_size, window_size):
   Gets the current observation window from obs
 
   Args:
-    obs: a numpy ndarray for storing observations
-    iteration: local iteration number
-    obs_mem_size: size of obs array
+    obs: a circular buffer stored as numpy ndarray for storing observations
+    iteration: local iteration number, used for accessing the buffer
+    obs_mem_size: size of obs array, used for accessing the buffer
     window_size: how many observations go into one window
   """
   obs_current_index = iteration % obs_mem_size
@@ -215,9 +224,9 @@ def get_training_window(obs, iteration, obs_mem_size, t, window_size,
   Gets training window from obs
 
   Args:
-    obs: a numpy ndarray for storing observations
-    iteration: local iteration number
-    obs_mem_size: size of obs array
+    obs: a circular buffer stored as numpy ndarray for storing observations
+    iteration: local iteration number, used for accessing the buffer
+    obs_mem_size: size of obs array, used for accessing the buffer
     t: how many timesteps to include
     window_size: how many observations in one window
     observation_shape: for example (84,84)
@@ -259,6 +268,10 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   crop_centering = config['crop_centering']
 
   obs_mem_size = t_max + window_size
+
+  # A circular buffer that stores obs_mem_size observations accessed through
+  # save_observation, get_obs_window and get_training_window functions,
+  # which handle the indexing.
   observation_buffer = np.zeros((obs_mem_size, *observation_shape))
   acts = np.zeros((t_max))
   rews = np.zeros((t_max))
