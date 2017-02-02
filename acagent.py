@@ -339,7 +339,14 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       ep_rews = 0
 
 class ACAgent(object):
+  """
+  ACAgent implements training of A3C algorithm for OpenAI Gym environments.
+  """
   def __init__(self, **usercfg):
+    """
+    Args:
+      usercfg: overrides for the default configuration
+    """
     self.config = dict(
         n_iter = 100,
         t_max = 10,
