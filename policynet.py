@@ -74,6 +74,8 @@ class ThreadModel(object):
         h_conv2_flat = tf.reshape(h_conv2, [-1, conv2_out_size])
         h_fc1 = tf.nn.relu(tf.matmul(h_conv2_flat, W_fc1) + b_fc1, name='h')
 
+      # nn_outputs holds the output of the convnet. It will be overridden by
+      # the LSTM output if LSTM is enabled.
       nn_outputs = h_fc1
       nn_output_size = 256
 
@@ -118,14 +120,16 @@ class ThreadModel(object):
       self.min_lr = tf.get_variable(
         'min_lr', initializer=tf.constant(initial_min_lr))
     else:
+      # The softmax output of the policy and the linear output of the value
+      # network
       with tf.name_scope('outputs'):
-        # The softmax output of policy and the linear output of value network
         logits = tf.nn.bias_add(tf.matmul(nn_outputs, W_softmax), b_softmax)
         self.pol_prob = tf.nn.softmax(logits)
         log_prob = tf.nn.log_softmax(logits)
         self.val = tf.nn.bias_add(tf.matmul(nn_outputs, W_linear),
           b_linear)
 
+      # Compute the loss functions for the policy and value networks
       with tf.name_scope('targets'):
         actions_one_hot = tf.reshape(tf.one_hot(self.ac, num_actions),
           (-1, num_actions))
@@ -143,6 +147,8 @@ class ThreadModel(object):
         self.grads = tf.gradients(total_loss, self.trainable_variables)
 
       with tf.name_scope('updates'):
+        # RMSProp updates are used with the RMS mean square variables stored
+        # globally and accessed by all threads.
         self.updates = self.get_rms_updates(
           global_network.trainable_variables,
           self.trainable_variables,
@@ -152,10 +158,12 @@ class ThreadModel(object):
           decay=rms_decay,
           epsilon=rms_epsilon)
 
+        # Defines an op to copy global variables to local variables.
         self.copy_to_local = self.get_global_to_local_updates(
           global_network.trainable_variables,
           self.trainable_variables)
 
+        # Linear learning rate decay on every learning step.
         lr_update = tf.cond(tf.greater(global_network.lr,
           global_network.min_lr),
           lambda: global_network.lr.assign(
