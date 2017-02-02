@@ -398,6 +398,9 @@ class ACAgent(object):
       self.global_model.saver.restore(self.session, self.config['load_path'])
 
   def learn(self):
+    """
+    Starts the learning threads.
+    """
     threads = []
     for i in range(self.config['num_threads']):
       threads.append(threading.Thread(target=learning_thread, args=(
