@@ -251,7 +251,7 @@ class ACAgent(object):
     self.action_num = self.envs[0].action_space.n
     self.use_rnn = self.config['use_rnn']
 
-    with tf.variable_scope('global'):
+    with tf.variable_scope('global'), tf.device('/cpu:0'):
       self.global_model = ThreadModel(self.input_shape, self.action_num, None,
         self.config)
 
