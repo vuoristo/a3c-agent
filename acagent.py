@@ -31,7 +31,7 @@ def categorical_sample(prob):
   csprob = np.cumsum(prob)
   return (csprob > np.random.rand()).argmax()
 
-def act(observation, model, session, running_rnn_state):
+def act(observation, model, session, running_rnn_state, evaluate):
   """
   Given an observation and a model return an action sampled from the policy.
 
@@ -51,7 +51,10 @@ def act(observation, model, session, running_rnn_state):
       })
   else:
     prob = session.run(model.pol_prob, {model.ob:observation})
-  action = categorical_sample(prob)
+  if not evaluate:
+    action = categorical_sample(prob)
+  else:
+    action = np.argmax(prob)
   return action, running_rnn_state
 
 def bootstrap_return(observation, model, session, running_rnn_state):
@@ -263,6 +266,8 @@ def learning_thread(thread_id, config, session, model, global_model, env):
   random_starts = config['random_starts']
   num_of_iterations = config['n_iter']
   train_dir = config['train_dir']
+  evaluate = config['evaluate']
+  render = config['render']
 
   observation_shape = config['ob_shape']
   crop_centering = config['crop_centering']
@@ -306,8 +311,11 @@ def learning_thread(thread_id, config, session, model, global_model, env):
     observation_window = get_obs_window(observation_buffer, iteration,
       obs_mem_size, window_size)
     action, running_rnn_state = act(observation_window, model, session,
-      running_rnn_state)
+      running_rnn_state, evaluate)
     ob, rew, done, _ = env.step(action)
+
+    if render:
+      env.render()
 
     t = iteration - t_start
     actions[t] = action
@@ -328,14 +336,15 @@ def learning_thread(thread_id, config, session, model, global_model, env):
       discounted_returns = discount_returns(
         rewards, gamma, final_return, t + 1)
 
-      training_rnn_state = run_updates(session, model, training_observations,
-        training_actions, discounted_returns, training_rnn_state)
+      if not evaluate:
+        training_rnn_state = run_updates(session, model, training_observations,
+          training_actions, discounted_returns, training_rnn_state)
 
       if thread_id == 0 and iteration % 100 == 0:
         write_summaries(summary_writer, session, model, training_observations,
           training_actions, discounted_returns, iteration, training_rnn_state)
 
-      if thread_id == 0 and iteration % 10000 == 0:
+      if thread_id == 0 and iteration % 10000 == 0 and not evaluate:
         global_model.saver.save(session, train_dir + 'model.ckpt',
           global_step=iteration)
 
@@ -390,6 +399,8 @@ class ACAgent(object):
         random_starts=30,
         load_path=None,
         train_dir='train',
+        evaluate=False,
+        render=False,
       )
 
     self.config.update(usercfg)
