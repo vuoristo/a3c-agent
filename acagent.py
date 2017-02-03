@@ -396,11 +396,11 @@ class ACAgent(object):
         entropy_beta = 0.01,
         rms_decay = 0.99,
         rms_epsilon = 0.01,
-        random_starts=30,
-        load_path=None,
-        train_dir='train',
-        evaluate=False,
-        render=False,
+        random_starts = 30,
+        load_path = None,
+        train_dir = 'train',
+        evaluate = False,
+        render = False,
       )
 
     self.config.update(usercfg)
