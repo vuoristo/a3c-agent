@@ -17,9 +17,10 @@ Installation
 * For Mac: Install requirements with `pip install -r requirements.txt`
 * For other OSs edit requirements.txt with correct tensorflow version
 
-Training the Agent
------------------------
-* Train the model with `python acagent.py`
+Running the Training / Evaluation
+---------------------------------
+* Train the model with `python AtariAgent.py --env <env_name>`
+* Evaluate a trained model with `python AtariAgent.py --env <env_name> --load_weights <path_to_weights> --evaluate --render`
 
 Description
 -----------
@@ -30,5 +31,4 @@ This implementation attemtps to follow the original specification closely while 
 TODOs
 -----
 * Cleaner thread handling. Utilize TF queues, monitors and runners.
-* Some kind of CLI.
 * Evaluate on multiple environments. Provide pretrained weights.
