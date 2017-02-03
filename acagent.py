@@ -438,13 +438,3 @@ class ACAgent(object):
 
     for thread in threads:
       thread.start()
-
-def main():
-  agent = ACAgent(gamma=0.99, n_iter=10000000, num_threads=8, t_max=5,
-    lr=0.001, min_lr=0.000001, lr_decay_no_steps=10000000, rnn_size=256,
-    window_size=1, env_name='Breakout-v0', use_rnn=True, entropy_beta=0.01,
-    rms_decay=0.99)
-  agent.learn()
-
-if __name__ == "__main__":
-  main()
