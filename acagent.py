@@ -345,7 +345,7 @@ def learning_thread(thread_id, config, session, model, global_model, env):
           training_actions, discounted_returns, iteration, training_rnn_state)
 
       if thread_id == 0 and iteration % 10000 == 0 and not evaluate:
-        global_model.saver.save(session, train_dir + 'model.ckpt',
+        global_model.saver.save(session, train_dir + '/model.ckpt',
           global_step=iteration)
 
       actions[:] = 0
