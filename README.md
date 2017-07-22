@@ -30,5 +30,6 @@ This implementation attemtps to follow the original specification closely while 
 
 TODOs
 -----
+* The training doesn't work reliably.
 * Cleaner thread handling. Utilize TF queues, monitors and runners.
 * Evaluate on multiple environments. Provide pretrained weights.
